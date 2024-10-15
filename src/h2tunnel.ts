@@ -62,65 +62,62 @@ function pruneHttp1Headers(headers: http.IncomingHttpHeaders) {
   return headersCopy;
 }
 
-abstract class AbstractTunnel extends events.EventEmitter<
+export abstract class AbstractTunnel extends events.EventEmitter<
   Record<TunnelState, []>
 > {
   abortController: AbortController;
-  abstract readonly tool: "server" | "client";
-  abstract iter(): void;
-  abstract get state(): TunnelState;
-  constructor(readonly logger?: (line: object) => void) {
+  abstract iter(): TunnelState;
+  constructor(
+    readonly log: (line: object) => void = (line) =>
+      process.stdout.write(JSON.stringify(line) + "\n"),
+  ) {
     super();
   }
 
-  log(line: object) {
-    line = { h2tunnel: this.tool, ...line };
-    if (this.logger) {
-      this.logger(line);
-    } else {
-      process.stdout.write(JSON.stringify(line) + "\n");
-    }
+  updateHook() {
+    const state = this.iter();
+    this.log({ state });
+    this.emit(state);
   }
 
   start() {
-    if (this.state !== "stopped") {
-      throw new Error("Already running");
-    }
     this.log({ starting: true, pid: process.pid });
     this.abortController = new AbortController();
     this.abortController.signal.addEventListener("abort", () => {
       this.log({ aborting: true });
-      this.iter();
+      this.updateHook();
     });
-    this.iter();
+    this.updateHook();
   }
 
   linkSockets(remoteSideSocket: net.Socket, localSideSocket: net.Socket) {
-    const spyToLocal = new stream.PassThrough();
-    const spyToRemote = new stream.PassThrough();
-    spyToLocal.on("data", (chunk: Buffer) => {
+    const spyReceive = new stream.PassThrough();
+    const spySend = new stream.PassThrough();
+    spyReceive.on("data", (chunk: Buffer) => {
       this.log({ receivedBytes: chunk.length });
     });
-    spyToRemote.on("data", (chunk: Buffer) => {
+    spySend.on("data", (chunk: Buffer) => {
       this.log({ sentBytes: chunk.length });
     });
-    remoteSideSocket.pipe(spyToLocal).pipe(localSideSocket);
-    localSideSocket.pipe(spyToRemote).pipe(remoteSideSocket);
+    remoteSideSocket.pipe(spyReceive).pipe(localSideSocket);
+    localSideSocket.pipe(spySend).pipe(remoteSideSocket);
     this.log({ socketsLinked: true });
   }
 
+  unlinkSockets(remoteSideSocket: net.Socket, localSideSocket: net.Socket) {
+    remoteSideSocket.unpipe(localSideSocket);
+    localSideSocket.unpipe(remoteSideSocket);
+    this.log({ socketsUnlinked: true });
+  }
+
   async waitUntilState(state: TunnelState): Promise<void> {
-    if (this.state !== state) {
+    if (this.iter() !== state) {
       await new Promise<void>((resolve) => this.once(state, resolve));
     }
   }
 
   async waitUntilConnected() {
     await this.waitUntilState("connected");
-  }
-
-  async waitUntilListening() {
-    await this.waitUntilState("listening");
   }
 
   async stop() {
@@ -130,23 +127,27 @@ abstract class AbstractTunnel extends events.EventEmitter<
 }
 
 export class TunnelServer extends AbstractTunnel {
-  tool = "server" as const;
   tunnelSocket: tls.TLSSocket | null = null;
+  tunnelSocketClosing = false;
   muxSession: http2.ClientHttp2Session | null = null;
+  muxSessionClosing = false;
   muxSessionConnected: boolean = false;
   tunnelServer: tls.Server | null = null;
+  tunnelServerClosing = false;
   httpServer: http.Server | null = null;
+  httpServerClosing = false;
   muxServer: net.Server | null = null;
+  muxServerClosing = false;
   muxServerListening = false; // muxServer.listening is not reliable
   muxSocket: net.Socket | null = null;
 
   constructor(readonly options: ServerOptions) {
     super(options.logger);
-    this.abortController = new AbortController();
   }
 
   startHttpServer() {
     this.log({ httpServer: "starting" });
+    this.httpServerClosing = false;
     this.httpServer = http.createServer(
       (req: http.IncomingMessage, res: http.ServerResponse) => {
         if (
@@ -169,6 +170,17 @@ export class TunnelServer extends AbstractTunnel {
           },
           { signal: this.abortController.signal },
         );
+        this.muxSession.once("close", () => {
+          if (!res.writableEnded) {
+            this.log({ muxSession: "close", resHeadersSent: res.headersSent });
+            if (res.headersSent) {
+              res.destroy();
+            } else {
+              res.writeHead(503);
+              res.end();
+            }
+          }
+        });
         req.pipe(stream);
         stream.on("error", () => {
           res.writeHead(503);
@@ -181,7 +193,12 @@ export class TunnelServer extends AbstractTunnel {
           );
           const headers = pruneHttp2Headers(http2Headers);
           this.log({
-            sendingHttp1Response: { status: status, headers },
+            sendingHttp1Response: {
+              method: req.method,
+              path: req.url,
+              status: status,
+              headers,
+            },
           });
           res.writeHead(status, headers);
           stream.pipe(res);
@@ -190,22 +207,24 @@ export class TunnelServer extends AbstractTunnel {
     );
     this.httpServer.on("listening", () => {
       this.log({ httpServer: "listening" });
-      this.iter();
+      this.updateHook();
     });
     this.httpServer.on("close", () => {
       this.log({ httpServer: "close" });
+      this.httpServerClosing = false;
       this.httpServer = null;
-      this.iter();
+      this.updateHook();
     });
     this.httpServer.listen(
       this.options.proxyListenPort,
       this.options.proxyListenIp,
     );
-    this.iter();
+    this.updateHook();
   }
 
   startTunnelServer() {
     this.log({ tunnelServer: "starting" });
+    this.tunnelServerClosing = false;
     this.tunnelServer = tls.createServer({
       key: this.options.key,
       cert: this.options.cert,
@@ -214,59 +233,62 @@ export class TunnelServer extends AbstractTunnel {
       // This is necessary only if the client uses a self-signed certificate.
       ca: [this.options.cert],
     });
+    this.tunnelServer.maxConnections = 1;
+    this.tunnelServer.on("drop", (options) => {
+      this.log({ tunnelServer: "drop", options });
+    });
     this.tunnelServer.on("close", () => {
       this.log({ tunnelServer: "close" });
       this.tunnelServer = null;
-      this.iter();
+      this.updateHook();
     });
     this.tunnelServer.on("error", (err) => {
       this.log({ tunnelServer: "error", err });
     });
-    this.tunnelServer.on(
-      "secureConnection",
-      (newTunnelSocket: tls.TLSSocket) => {
-        this.log({
-          tunnelServer: "secureConnection",
-          socket: Object.fromEntries(
-            SOCKET_PROPS.map((k) => [k, newTunnelSocket[k]]),
-          ),
+    this.tunnelServer.on("tlsClientError", (err) => {
+      this.log({ tunnelServer: "tlsClientError", err });
+    });
+    this.tunnelServer.on("secureConnection", (socket: tls.TLSSocket) => {
+      this.log({
+        tunnelServer: "secureConnection",
+        socket: Object.fromEntries(SOCKET_PROPS.map((k) => [k, socket[k]])),
+      });
+      if (!this.abortController.signal.aborted) {
+        this.tunnelSocketClosing = false;
+        this.tunnelSocket = socket;
+        this.tunnelSocket.on("error", (err) => {
+          this.log({ tunnelSocket: "error", err });
         });
-        if (!this.abortController.signal.aborted) {
-          this.tunnelSocket = newTunnelSocket;
-          this.tunnelSocket.on("error", (err) => {
-            this.log({ tunnelSocket: "error", err });
-          });
-          this.tunnelSocket.on("close", () => {
-            this.log({ tunnelSocket: "close" });
-            this.tunnelSocket = null;
-            this.muxSocket?.end();
-            this.iter();
-          });
-          this.iter();
-        }
-      },
-    );
+        this.tunnelSocket.on("close", () => {
+          this.log({ tunnelSocket: "close" });
+          this.tunnelSocket = null;
+          this.updateHook();
+        });
+        this.updateHook();
+      }
+    });
     this.tunnelServer.listen(
       this.options.tunnelListenPort,
       this.options.tunnelListenIp,
-      () => this.iter(),
+      () => this.updateHook(),
     );
-    this.iter();
   }
 
   startMuxServer() {
     this.log({ muxServer: "starting" });
+    this.muxServerClosing = false;
     this.muxServer = net.createServer();
     this.muxServer.maxConnections = 1;
     this.muxServer.on("connection", (socket: net.Socket) => {
       this.log({ muxServer: "connection" });
       if (!this.tunnelSocket) {
         this.log({ muxServerRejectConnectionBecauseTunnelIsClosed: true });
-        socket.end();
+        // TODO: Close gracefully
+        socket.destroy();
       } else {
         this.muxSocket = socket;
         this.linkSockets(this.tunnelSocket, this.muxSocket);
-        this.iter();
+        this.updateHook();
       }
     });
     this.muxServer.on("drop", (options) => {
@@ -275,7 +297,7 @@ export class TunnelServer extends AbstractTunnel {
     this.muxServer.on("listening", () => {
       this.log({ muxServer: "listening" });
       this.muxServerListening = true;
-      this.iter();
+      this.updateHook();
     });
     this.muxServer.on("error", (err) => {
       this.log({ muxServer: "error", err });
@@ -284,36 +306,14 @@ export class TunnelServer extends AbstractTunnel {
       this.log({ muxServer: "close" });
       this.muxServer = null;
       this.muxServerListening = false;
-      this.iter();
+      this.updateHook();
     });
     this.muxServer.listen(this.options.muxListenPort);
   }
 
-  get state(): TunnelState {
-    if (
-      !this.muxSession &&
-      !this.httpServer &&
-      !this.muxServer &&
-      !this.tunnelServer
-    ) {
-      return "stopped";
-    } else if (this.abortController.signal.aborted) {
-      return "stopping";
-    } else if (this.muxSession) {
-      return "connected";
-    } else if (
-      this.tunnelServer?.listening &&
-      this.muxServerListening &&
-      this.httpServer?.listening
-    ) {
-      return "listening";
-    } else {
-      return "starting";
-    }
-  }
-
   startMuxSession() {
     this.log({ muxSession: "starting" });
+    this.muxSessionClosing = false;
     this.muxSession = http2.connect(
       `https://localhost:${this.options.muxListenPort}`,
       {
@@ -325,75 +325,113 @@ export class TunnelServer extends AbstractTunnel {
       },
     );
     this.muxSession.on("connect", () => {
-      this.log({ muxSession: "connected" });
+      this.log({ muxSession: "connect" });
       this.muxSessionConnected = true;
-      this.iter();
+      this.updateHook();
     });
     this.muxSession.on("close", () => {
-      this.log({ muxSession: "closed" });
+      this.log({ muxSession: "close" });
       this.muxSession = null;
       this.muxSessionConnected = false;
-      this.iter();
+      this.updateHook();
     });
     this.muxSession.on("error", (err) => {
       this.log({ muxSession: "error", err });
     });
-    this.iter();
   }
 
   iter() {
-    if (this.abortController.signal.aborted) {
-      if (this.httpServer) {
-        this.httpServer.close();
-      } else if (this.muxSession) {
-        this.muxSession.close();
-      } else if (this.muxServer) {
-        this.muxServer.close();
-      } else if (this.tunnelSocket) {
-        this.tunnelSocket.end();
-      } else if (this.tunnelServer) {
-        this.tunnelServer.close();
-      }
-    } else {
-      if (!this.tunnelServer) {
-        this.startTunnelServer();
-      } else if (!this.muxServer) {
-        this.startMuxServer();
-      } else if (!this.httpServer) {
-        this.startHttpServer();
-      } else if (
-        this.muxServerListening &&
-        this.tunnelSocket &&
-        !this.muxSession
-      ) {
-        this.startMuxSession();
+    while (true) {
+      if (this.abortController.signal.aborted) {
+        if (this.httpServer && !this.httpServerClosing) {
+          this.httpServerClosing = true;
+          this.httpServer.close();
+        } else if (this.muxSession && !this.muxSessionClosing) {
+          this.muxSessionClosing = true;
+          this.muxSession.close();
+        } else if (this.muxServer && !this.muxServerClosing) {
+          if (this.muxServer.listening) {
+            this.muxServerClosing = true;
+            this.muxServer.close();
+          } else {
+            this.muxServer = null;
+          }
+        } else if (this.tunnelSocket && !this.tunnelSocketClosing) {
+          this.tunnelSocketClosing = true;
+          this.tunnelSocket.end();
+        } else if (this.tunnelServer && !this.tunnelServerClosing) {
+          this.tunnelServerClosing = true;
+          this.tunnelServer.close();
+        } else if (
+          !this.muxSession &&
+          !this.httpServer &&
+          !this.muxServer &&
+          !this.tunnelServer
+        ) {
+          return "stopped";
+        } else {
+          return "stopping";
+        }
+      } else {
+        if (!this.tunnelServer) {
+          this.startTunnelServer();
+        } else if (!this.muxServer) {
+          this.startMuxServer();
+        } else if (!this.httpServer) {
+          this.startHttpServer();
+        } else if (
+          !this.httpServer.listening ||
+          !this.tunnelServer.listening ||
+          !this.muxServer.listening
+        ) {
+          // Wait until everything is listening
+          return "starting";
+        } else if (!this.tunnelSocket) {
+          // Nothing else to do until we have a tunnel socket
+          return "listening";
+        } else if (!this.muxSession) {
+          this.startMuxSession();
+        } else if (this.muxSessionConnected) {
+          return "connected";
+        } else {
+          return "listening";
+        }
       }
     }
-    this.emit(this.state);
+  }
+
+  async waitUntilListening() {
+    await this.waitUntilState("listening");
   }
 }
 
 export class TunnelClient extends AbstractTunnel {
-  tool = "client" as const;
-  demuxServer: http2.Http2SecureServer | null = null;
+  demux: null | {
+    server: http2.Http2SecureServer;
+    closing: boolean;
+  };
   demuxSession: http2.ServerHttp2Session | null = null;
-  tunnelSocket: tls.TLSSocket | null = null;
-  tunnelSocketConnected = false;
+  demuxSessionClosing = false;
+  tunnel: null | {
+    socket: tls.TLSSocket;
+    state: "connecting" | "connected" | "closing";
+  };
   // The tunnel will not restart as long as this property is not null
   tunnelSocketRestartTimeout: NodeJS.Timeout | null = null;
-  reverseSocket: net.Socket | null = null;
-  reverseSocketConnected = false;
+  reverse: null | {
+    socket: net.Socket;
+    state: "connecting" | "connected" | "closing";
+  };
   socketsLinked = false;
 
   constructor(readonly options: ClientOptions) {
     super(options.logger);
-    this.abortController = new AbortController();
   }
 
   startTunnel() {
     this.log({ tunnelSocket: "starting" });
     this.tunnelSocketRestartTimeout = null;
-    this.tunnelSocket = tls.connect({
+    const socket = tls.connect({
       host: this.options.tunnelHost,
       port: this.options.tunnelPort,
       // Necessary only if the server requires client certificate authentication.
@@ -404,18 +442,17 @@ export class TunnelClient extends AbstractTunnel {
       // Necessary only if the server's cert isn't for "localhost".
       checkServerIdentity: () => undefined,
     });
-    this.tunnelSocket.on("secureConnect", () => {
+    socket.on("secureConnect", () => {
       this.log({ tunnelSocket: "secureConnect" });
-      this.tunnelSocketConnected = true;
-      this.iter();
+      this.tunnel = { socket: socket, state: "connected" };
+      this.updateHook();
     });
-    this.tunnelSocket.on("error", (err) => {
+    socket.on("error", (err) => {
       this.log({ tunnelSocket: "error", err });
     });
-    this.tunnelSocket.on("close", () => {
+    socket.on("close", () => {
       this.log({ tunnelSocket: "close" });
-      this.tunnelSocket = null;
-      this.tunnelSocketConnected = false;
+      this.tunnel = null;
       this.socketsLinked = false;
       // This session doesn't detect a broken tunnel, it needs to be terminated manually
       this.demuxSession?.close();
@@ -425,33 +462,90 @@ export class TunnelClient extends AbstractTunnel {
         this.log({ tunnelSocketWillRestart: timeout });
         this.tunnelSocketRestartTimeout = setTimeout(() => {
           this.tunnelSocketRestartTimeout = null;
-          this.iter();
+          this.updateHook();
         }, timeout);
       }
-      this.iter();
+      this.updateHook();
     });
+    this.tunnel = { socket: socket, state: "connecting" };
   }
 
   startReverseSocket() {
-    this.reverseSocket = net.createConnection({
+    const socket = net.createConnection({
       host: "localhost",
       port: this.options.demuxListenPort,
     });
-    this.reverseSocket.on("close", () => {
-      this.log({ reverseSocketClose: true });
-      this.reverseSocket = null;
-      this.reverseSocketConnected = false;
+    socket.on("error", (err) => {
+      this.log({ reverseSocket: "error", err });
+    });
+    socket.on("close", () => {
+      this.log({ reverseSocket: "close" });
+      this.reverse = null;
       this.socketsLinked = false;
-      this.iter();
+      this.updateHook();
     });
-    this.reverseSocket.on("connect", () => {
-      this.reverseSocketConnected = true;
-      this.iter();
+    socket.on("connect", () => {
+      this.log({ reverseSocket: "connect" });
+      this.reverse = { socket, state: "connected" };
+      this.updateHook();
     });
+    this.reverse = { socket, state: "connecting" };
+  }
+
+  receiveHttp2Request(
+    stream: http2.ServerHttp2Stream,
+    headers: http2.IncomingHttpHeaders,
+  ) {
+    const method = headers[http2.constants.HTTP2_HEADER_METHOD] as string;
+    const path = headers[http2.constants.HTTP2_HEADER_PATH] as string;
+    this.log({ receivingHttp2Request: { method, path } });
+    const req = http.request({
+      hostname: "localhost",
+      port: this.options.localHttpPort,
+      path: path,
+      method: method,
+      headers: pruneHttp2Headers(headers),
+      signal: this.abortController.signal,
+    });
+    req.on("response", (res: http.IncomingMessage) => {
+      const headers = pruneHttp1Headers(res.headers);
+      this.log({
+        sendingHttp2Response: { status: res.statusCode, headers },
+      });
+      stream.respond({
+        [http2.constants.HTTP2_HEADER_STATUS]: res.statusCode,
+        ...headers,
+      });
+      res.pipe(stream);
+    });
+    req.on("error", (e) => {
+      this.log({ http1ReqError: e });
+      stream.destroy();
+    });
+    stream.pipe(req);
+  }
+
+  receiveDemuxSession(session: http2.ServerHttp2Session) {
+    this.demuxSession = session;
+    this.demuxSessionClosing = false;
+    this.demuxSession.on("error", (err) => {
+      this.log({ demuxSession: "error", err });
+      this.demuxSession = null;
+      this.updateHook();
+    });
+    this.demuxSession.on("close", () => {
+      this.log({ demuxSession: "close" });
+      this.demuxSession = null;
+      this.updateHook();
+    });
+    this.demuxSession.on("stream", (stream, headers) =>
+      this.receiveHttp2Request(stream, headers),
+    );
+    this.updateHook();
   }
 
   startDemuxServer() {
-    this.demuxServer = http2.createSecureServer({
+    const server = http2.createSecureServer({
       key: this.options.key,
       cert: this.options.cert,
       // This is necessary only if using client certificate authentication.
@@ -459,138 +553,93 @@ export class TunnelClient extends AbstractTunnel {
       // This is necessary only if the client uses a self-signed certificate.
       ca: [this.options.cert],
     });
-    this.demuxServer.on("close", () => {
-      this.demuxServer = null;
-      this.iter();
+    server.on("close", () => {
+      this.demux = null;
+      this.updateHook();
     });
-    this.demuxServer.on("timeout", () => {
+    server.on("timeout", () => {
       this.log({ demuxServer: "timeout" });
     });
-    this.demuxServer.on("sessionError", (err) => {
+    server.on("sessionError", (err) => {
       this.log({ demuxServer: "sessionError", err });
     });
-    this.demuxServer.on("clientError", (err) => {
+    server.on("clientError", (err) => {
       this.log({ demuxServer: "clientError", err });
     });
-    this.demuxServer.on("unknownProtocol", () => {
+    server.on("unknownProtocol", () => {
       this.log({ demuxServer: "unknownProtocol" });
     });
-    this.demuxServer.on("session", (session: http2.ServerHttp2Session) => {
-      this.demuxSession = session;
-      this.demuxSession.on("error", (err) => {
-        this.log({ demuxSession: "error", err });
-        this.demuxSession = null;
-        this.iter();
-      });
-      this.demuxSession.on("close", () => {
-        this.log({ demuxSession: "close" });
-        this.demuxSession = null;
-        this.iter();
-      });
-      this.demuxSession.on(
-        "stream",
-        async (
-          stream: http2.ServerHttp2Stream,
-          headers: http2.IncomingHttpHeaders,
-        ) => {
-          const method = headers[http2.constants.HTTP2_HEADER_METHOD] as string;
-          const path = headers[http2.constants.HTTP2_HEADER_PATH] as string;
-          this.log({ receivingHttp2Request: { method, path } });
-          const req = http.request(
-            {
-              hostname: "localhost",
-              port: this.options.localHttpPort,
-              path: path,
-              method: method,
-              headers: pruneHttp2Headers(headers),
-              signal: this.abortController.signal,
-            },
-            (res: http.IncomingMessage) => {
-              const headers = pruneHttp1Headers(res.headers);
-              this.log({
-                sendingHttp2Response: { status: res.statusCode, headers },
-              });
-              stream.respond({
-                [http2.constants.HTTP2_HEADER_STATUS]: res.statusCode,
-                ...headers,
-              });
-              res.pipe(stream);
-            },
-          );
-          req.on("error", (e) => {
-            this.log({ http1ReqError: e });
-          });
-          stream.pipe(req);
-        },
-      );
-      this.iter();
-    });
-    this.demuxServer.on("listening", () => {
+    server.on("session", (session) => this.receiveDemuxSession(session));
+    server.on("listening", () => {
       this.log({ demuxServer: "listening" });
-      this.iter();
+      this.updateHook();
     });
-    this.demuxServer.listen(this.options.demuxListenPort);
-    this.iter();
-  }
-
-  get state(): TunnelState {
-    if (!this.tunnelSocket && !this.reverseSocket) {
-      return "stopped";
-    } else if (this.abortController.signal.aborted) {
-      return "stopping";
-    } else if (this.socketsLinked && this.demuxSession) {
-      return "connected";
-    } else if (this.demuxServer?.listening) {
-      return "listening";
-    } else {
-      return "starting";
-    }
+    server.listen(this.options.demuxListenPort);
+    this.demux = { server, closing: false };
   }
 
   iter() {
-    if (this.abortController.signal.aborted) {
-      if (this.tunnelSocketRestartTimeout) {
-        clearTimeout(this.tunnelSocketRestartTimeout);
-        this.tunnelSocketRestartTimeout = null;
-      } else if (this.reverseSocket) {
-        this.reverseSocket.end();
-      } else if (this.tunnelSocket) {
-        this.tunnelSocket.end();
-      } else if (this.demuxSession) {
-        this.demuxSession.close();
-      } else if (this.demuxServer) {
-        this.demuxServer.close();
-      }
-    } else {
-      if (!this.demuxServer) {
-        this.startDemuxServer();
-        this.iter();
-        return;
-      }
-      if (this.demuxServer.listening && !this.reverseSocket) {
-        this.startReverseSocket();
-        this.iter();
-        return;
-      }
-      if (
-        this.reverseSocket &&
-        this.reverseSocketConnected &&
-        this.tunnelSocket &&
-        this.tunnelSocketConnected &&
-        !this.socketsLinked
-      ) {
-        this.linkSockets(this.tunnelSocket, this.reverseSocket);
-        this.socketsLinked = true;
-        this.iter();
-        return;
-      }
-      if (!this.tunnelSocket && !this.tunnelSocketRestartTimeout) {
-        this.startTunnel();
-        this.iter();
-        return;
+    while (true) {
+      if (this.abortController.signal.aborted) {
+        if (this.tunnelSocketRestartTimeout) {
+          clearTimeout(this.tunnelSocketRestartTimeout);
+          this.tunnelSocketRestartTimeout = null;
+        } else if (this.demuxSession) {
+          if (!this.demuxSessionClosing) {
+            this.demuxSessionClosing = true;
+            this.demuxSession.close();
+          } else {
+            // Do not mess around with sockets until HTTP2 session is cleanly closed
+            return "stopping";
+          }
+        } else if (this.socketsLinked && this.tunnel && this.reverse) {
+          // Unlink sockets before closing them individually
+          this.unlinkSockets(this.reverse.socket, this.tunnel.socket);
+          this.socketsLinked = false;
+        } else if (this.tunnel || this.reverse) {
+          // Sockets are unlinked, they are safe to stop simultaneously
+          if (this.tunnel && this.tunnel.state !== "closing") {
+            this.tunnel.state = "closing";
+            this.tunnel.socket.end();
+          }
+          if (this.reverse && this.reverse.state !== "closing") {
+            this.reverse.state = "closing";
+            this.reverse.socket.end();
+          }
+          // Do not continue until both are stopped
+          return "stopping";
+        } else if (this.demux) {
+          if (!this.demux.closing) {
+            this.demux.closing = true;
+            this.demux.server.close();
+          } else {
+            return "stopping";
+          }
+        } else {
+          return "stopped";
+        }
+      } else {
+        if (!this.demux) {
+          this.startDemuxServer();
+        } else if (!this.tunnel && !this.tunnelSocketRestartTimeout) {
+          this.startTunnel();
+        } else if (
+          !this.demux.server.listening ||
+          !this.tunnel ||
+          this.tunnel.state !== "connected"
+        ) {
+          return "starting";
+        } else if (!this.reverse) {
+          this.startReverseSocket();
+        } else if (this.reverse.state === "connected" && !this.socketsLinked) {
+          this.linkSockets(this.tunnel.socket, this.reverse.socket);
+          this.socketsLinked = true;
+        } else if (this.socketsLinked && this.demuxSession) {
+          return "connected";
+        } else {
+          return "starting";
+        }
       }
     }
-
-    this.emit(this.state);
   }
 }

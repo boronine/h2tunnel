@@ -4,7 +4,7 @@
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/boronine/h2tunnel/node.js.yml)
 
 A CLI tool and Node.js library for a popular "tunneling" workflow, similar to the proprietary [ngrok](https://ngrok.com/)
-or the openssh-based `ssh -L` solution. All in [less than 600 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
+or the openssh-based `ssh -L` solution. All in [less than 700 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
 with no dependencies.
 
 ![Diagram](https://raw.githubusercontent.com/boronine/h2tunnel/main/diagram.drawio.svg)

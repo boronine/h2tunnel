@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { TunnelClient, TunnelServer } from "./h2tunnel.js";
+import { AbstractTunnel, TunnelClient, TunnelServer } from "./h2tunnel.js";
 import * as fs from "node:fs";
 
 const { positionals, values } = parseArgs({
@@ -92,32 +92,36 @@ server options:
   --${"mux-listen-port" satisfies Param} <port>     Port for the HTTP2 server to listen on
 `;
 
-const command = positionals[0];
-if (command === "client") {
-  const client = new TunnelClient({
-    tunnelHost: getString("tunnel-host"),
-    tunnelPort: getInt("tunnel-port"),
-    key: fs.readFileSync(getString("key"), "utf8"),
-    cert: fs.readFileSync(getString("crt"), "utf8"),
-    localHttpPort: getInt("local-http-port"),
-    demuxListenPort: getInt("demux-listen-port"),
-  });
-  process.on("SIGINT", () => client.stop());
-  process.on("SIGTERM", () => client.stop());
-  client.start();
-} else if (command === "server") {
-  const server = new TunnelServer({
-    tunnelListenIp: getString("tunnel-listen-ip"),
-    tunnelListenPort: getInt("tunnel-listen-port"),
-    key: fs.readFileSync(getString("key"), "utf8"),
-    cert: fs.readFileSync(getString("crt"), "utf8"),
-    proxyListenPort: getInt("proxy-listen-port"),
-    proxyListenIp: getString("proxy-listen-ip"),
-    muxListenPort: getInt("mux-listen-port"),
-  });
-  process.on("SIGINT", () => server.stop());
-  process.on("SIGTERM", () => server.stop());
-  server.start();
-} else {
+if (positionals.length === 0) {
   process.stdout.write(HELP_TEXT);
+} else {
+  const command = positionals[0];
+  let tunnel: AbstractTunnel;
+  if (command === "client") {
+    tunnel = new TunnelClient({
+      tunnelHost: getString("tunnel-host"),
+      tunnelPort: getInt("tunnel-port"),
+      key: fs.readFileSync(getString("key"), "utf8"),
+      cert: fs.readFileSync(getString("crt"), "utf8"),
+      localHttpPort: getInt("local-http-port"),
+      demuxListenPort: getInt("demux-listen-port"),
+    });
+  } else if (command === "server") {
+    tunnel = new TunnelServer({
+      tunnelListenIp: getString("tunnel-listen-ip"),
+      tunnelListenPort: getInt("tunnel-listen-port"),
+      key: fs.readFileSync(getString("key"), "utf8"),
+      cert: fs.readFileSync(getString("crt"), "utf8"),
+      proxyListenPort: getInt("proxy-listen-port"),
+      proxyListenIp: getString("proxy-listen-ip"),
+      muxListenPort: getInt("mux-listen-port"),
+    });
+  } else {
+    throw new Error(`Unknown command: ${command}`);
+  }
+
+  process.on("SIGINT", () => tunnel.abortController.abort());
+  process.on("SIGTERM", () => tunnel.abortController.abort());
+  tunnel.start();
+  await tunnel.waitUntilState("stopped");
 }

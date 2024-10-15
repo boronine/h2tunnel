@@ -12,7 +12,8 @@
   "devDependencies": {
     "@types/node": "^22.7.5",
     "typescript": "^5.6.3",
-    "prettier": "^3.3.3"
+    "prettier": "^3.3.3",
+    "c8": "^10.1.2"
   },
   "repository": {
     "type": "git",
@@ -39,7 +40,8 @@
   "scripts": {
     "format": "npx prettier --write .",
     "build": "npx tsc",
-    "test": "npx tsc && node --enable-source-maps --experimental-test-coverage --test build/h2tunnel.test.js"
+    "test": "npx tsc && node --enable-source-maps --experimental-test-coverage --test build/h2tunnel.test.js",
+    "coverage": "npx tsc && c8 --reporter html node build/h2tunnel.test.js"
   },
   "engines": {
     "node": ">=20"
