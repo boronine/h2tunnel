@@ -1,0 +1,35 @@
+services:
+  caddy:
+    image: caddy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on:
+      - h2tunnel
+    # Use this to provide TUNNEL_DOMAIN
+    env_file: .env
+    volumes:
+      - $PWD/Caddyfile:/etc/caddy/Caddyfile
+      - /data
+      - /config
+  h2tunnel:
+    build: .
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    secrets:
+      - crt
+      - key
+    ports:
+      - "80" # for caddy
+      - "15001:15001"
+    command: h2tunnel server --crt=/run/secrets/crt --key=/run/secrets/key --tunnel-listen-ip=0.0.0.0 --tunnel-listen-port=15001 --proxy-listen-port=80 --proxy-listen-ip=0.0.0.0 --mux-listen-port=15002
+secrets:
+  crt:
+    file: ./h2tunnel.crt
+  key:
+    file: ./h2tunnel.key

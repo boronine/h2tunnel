@@ -1,0 +1,8 @@
+/node_modules
+/dist
+/build
+# npm pack output
+/*.tgz
+/*.crt
+/*.key
+/.env

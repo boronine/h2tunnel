@@ -1,0 +1,3 @@
+{$TUNNEL_DOMAIN} {
+  reverse_proxy h2tunnel:80
+}

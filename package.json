@@ -1,0 +1,47 @@
+{
+  "name": "h2tunnel",
+  "description": "localhost tunnel using HTTP2 multiplexing",
+  "version": "0.0.1-alpha.6",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Alexei Boronine",
+    "email": "alexei@boronine.com",
+    "url": "https://www.boronine.com"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "typescript": "^5.6.3",
+    "prettier": "^3.3.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boronine/h2tunnel.git"
+  },
+  "exports": {
+    ".": {
+      "types": "./build/h2tunnel.d.ts",
+      "import": "./build/h2tunnel.js"
+    }
+  },
+  "files": [
+    "README.md",
+    "LICENSE",
+    "package.json",
+    "build/h2tunnel.js",
+    "build/h2tunnel.d.ts",
+    "build/cli.js",
+    "build/cli.d.ts"
+  ],
+  "bin": {
+    "h2tunnel": "./build/cli.js"
+  },
+  "scripts": {
+    "format": "npx prettier --write .",
+    "build": "npx tsc",
+    "test": "npx tsc && node --enable-source-maps --experimental-test-coverage --test build/h2tunnel.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
