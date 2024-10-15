@@ -3,7 +3,6 @@
 ![NPM Version](https://img.shields.io/npm/v/h2tunnel)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/boronine/h2tunnel/node.js.yml)
 
-
 A low level tool for a popular "tunneling" workflow, similar to the proprietary [ngrok](https://ngrok.com/)
 or the openssh-based `ssh -L` solution. All in [less than 600 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
 with no dependencies.
@@ -67,14 +66,32 @@ Start the server:
 docker compose up 
 ```
 
+### Use as a library
+
+You can integrate h2tunnel into your own Node.js application by importing the `TunnelServer` and `TunnelClient` classes.
+
+```typescript
+import {TunnelClient} from "h2tunnel";
+
+const client = new TunnelClient({
+    logger: (line) => console.log(line), // optional
+    key: `-----BEGIN PRIVATE KEY----- ...`,
+    cert: `-----BEGIN CERTIFICATE----- ...`,
+    demuxListenPort: 15002,
+    localHttpPort: 8000,
+    tunnelHost: `mysite.example.com`,
+    tunnelPort: 15001,
+});
+
+// Start the client
+client.start();
+
+// Stop the client
+await client.stop();
+```
+
 ## Testing
 
 ```bash
 npm run test
-```
-
-# Releasing
-
-```bash
-npm run build && npm version prerelease --preid=alpha && npm publish
 ```
