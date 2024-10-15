@@ -19,8 +19,6 @@ services:
   h2tunnel:
     build: .
     restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
     secrets:
       - crt
       - key

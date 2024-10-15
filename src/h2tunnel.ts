@@ -21,8 +21,8 @@ export interface CommonOptions {
 export interface ServerOptions extends CommonOptions {
   tunnelListenIp: string;
   tunnelListenPort: number;
-  proxyListenPort: number;
   proxyListenIp: string;
+  proxyListenPort: number;
   muxListenPort: number;
 }
 
@@ -146,51 +146,47 @@ export class TunnelServer extends AbstractTunnel {
   }
 
   startHttpServer() {
-    this.log({ httpServerStarting: true });
+    this.log({ httpServer: "starting" });
     this.httpServer = http.createServer(
-      (http1Req: http.IncomingMessage, http1Res: http.ServerResponse) => {
+      (req: http.IncomingMessage, res: http.ServerResponse) => {
         if (
-          this.tunnelSocket === null ||
-          this.muxSession === null ||
+          !this.tunnelSocket ||
+          !this.muxSession ||
           !this.muxSessionConnected
         ) {
-          http1Res.writeHead(503);
-          http1Res.end();
+          res.writeHead(503);
+          res.end();
           return;
         }
         this.log({
-          http12ProxyRequest: { path: http1Req.url, method: http1Req.method },
+          receivingHttp1Request: { method: req.method, path: req.url },
         });
-        const http2Stream: http2.ClientHttp2Stream = this.muxSession.request(
+        const stream: http2.ClientHttp2Stream = this.muxSession.request(
           {
-            [http2.constants.HTTP2_HEADER_METHOD]: http1Req.method,
-            [http2.constants.HTTP2_HEADER_PATH]: http1Req.url,
-            ...pruneHttp1Headers(http1Req.headers),
+            [http2.constants.HTTP2_HEADER_METHOD]: req.method,
+            [http2.constants.HTTP2_HEADER_PATH]: req.url,
+            ...pruneHttp1Headers(req.headers),
           },
           { signal: this.abortController.signal },
         );
-        http1Req.pipe(http2Stream);
-        http2Stream.on("error", () => {
-          http1Res.writeHead(503);
-          http1Res.end();
+        req.pipe(stream);
+        stream.on("error", () => {
+          res.writeHead(503);
+          res.end();
           return;
         });
-        // http2Stream.on("abort", () => {});
-        http2Stream.on("response", (headers: http2.IncomingHttpHeaders) => {
-          const status = Number(headers[http2.constants.HTTP2_HEADER_STATUS]);
-          const prunedHeaders = pruneHttp2Headers(headers);
+        stream.on("response", (http2Headers: http2.IncomingHttpHeaders) => {
+          const status = Number(
+            http2Headers[http2.constants.HTTP2_HEADER_STATUS],
+          );
+          const headers = pruneHttp2Headers(http2Headers);
           this.log({
-            http12ProxyResponse: { status: status, prunedHeaders },
+            sendingHttp1Response: { status: status, headers },
           });
-          http1Res.writeHead(status, pruneHttp2Headers(headers));
-          http2Stream.pipe(http1Res);
+          res.writeHead(status, headers);
+          stream.pipe(res);
         });
       },
-    );
-
-    this.httpServer.listen(
-      this.options.proxyListenPort,
-      this.options.proxyListenIp,
     );
     this.httpServer.on("listening", () => {
       this.log({ httpServer: "listening" });
@@ -201,6 +197,11 @@ export class TunnelServer extends AbstractTunnel {
       this.httpServer = null;
       this.iter();
     });
+    this.httpServer.listen(
+      this.options.proxyListenPort,
+      this.options.proxyListenIp,
+    );
+    this.iter();
   }
 
   startTunnelServer() {
@@ -250,6 +251,7 @@ export class TunnelServer extends AbstractTunnel {
       this.options.tunnelListenIp,
       () => this.iter(),
     );
+    this.iter();
   }
 
   startMuxServer() {
@@ -289,15 +291,15 @@ export class TunnelServer extends AbstractTunnel {
 
   get state(): TunnelState {
     if (
-      this.muxSession === null &&
-      this.httpServer === null &&
-      this.muxServer === null &&
-      this.tunnelServer === null
+      !this.muxSession &&
+      !this.httpServer &&
+      !this.muxServer &&
+      !this.tunnelServer
     ) {
       return "stopped";
     } else if (this.abortController.signal.aborted) {
       return "stopping";
-    } else if (this.muxSession !== null) {
+    } else if (this.muxSession) {
       return "connected";
     } else if (
       this.tunnelServer?.listening &&
@@ -336,6 +338,7 @@ export class TunnelServer extends AbstractTunnel {
     this.muxSession.on("error", (err) => {
       this.log({ muxSession: "error", err });
     });
+    this.iter();
   }
 
   iter() {
@@ -354,23 +357,16 @@ export class TunnelServer extends AbstractTunnel {
     } else {
       if (!this.tunnelServer) {
         this.startTunnelServer();
-        this.iter();
-        return;
-      }
-      if (!this.muxServer) {
+      } else if (!this.muxServer) {
         this.startMuxServer();
-        this.iter();
-        return;
-      }
-      if (!this.httpServer) {
+      } else if (!this.httpServer) {
         this.startHttpServer();
-        this.iter();
-        return;
-      }
-      if (this.muxServerListening && this.tunnelSocket && !this.muxSession) {
+      } else if (
+        this.muxServerListening &&
+        this.tunnelSocket &&
+        !this.muxSession
+      ) {
         this.startMuxSession();
-        this.iter();
-        return;
       }
     }
     this.emit(this.state);
@@ -383,6 +379,7 @@ export class TunnelClient extends AbstractTunnel {
   demuxSession: http2.ServerHttp2Session | null = null;
   tunnelSocket: tls.TLSSocket | null = null;
   tunnelSocketConnected = false;
+  // The tunnel will not restart as long as this property is not null
   tunnelSocketRestartTimeout: NodeJS.Timeout | null = null;
   reverseSocket: net.Socket | null = null;
   reverseSocketConnected = false;
@@ -414,27 +411,25 @@ export class TunnelClient extends AbstractTunnel {
     });
     this.tunnelSocket.on("error", (err) => {
       this.log({ tunnelSocket: "error", err });
-      this.onTunnelSocketClosed();
     });
     this.tunnelSocket.on("close", () => {
       this.log({ tunnelSocket: "close" });
-      this.onTunnelSocketClosed();
+      this.tunnelSocket = null;
+      this.tunnelSocketConnected = false;
+      this.socketsLinked = false;
+      // This session doesn't detect a broken tunnel, it needs to be terminated manually
+      this.demuxSession?.close();
+      if (!this.abortController.signal.aborted) {
+        const timeout =
+          this.options.tunnelRestartTimeout ?? DEFAULT_TUNNEL_RESTART_TIMEOUT;
+        this.log({ tunnelSocketWillRestart: timeout });
+        this.tunnelSocketRestartTimeout = setTimeout(() => {
+          this.tunnelSocketRestartTimeout = null;
+          this.iter();
+        }, timeout);
+      }
+      this.iter();
     });
-  }
-
-  onTunnelSocketClosed() {
-    this.tunnelSocket = null;
-    this.tunnelSocketConnected = false;
-    this.socketsLinked = false;
-    this.demuxSession?.close();
-    if (!this.abortController.signal.aborted) {
-      this.log({ tunnelSocketRestartScheduling: true });
-      this.tunnelSocketRestartTimeout = setTimeout(() => {
-        this.tunnelSocketRestartTimeout = null;
-        this.iter();
-      }, this.options.tunnelRestartTimeout ?? DEFAULT_TUNNEL_RESTART_TIMEOUT);
-    }
-    this.iter();
   }
 
   startReverseSocket() {
@@ -469,26 +464,26 @@ export class TunnelClient extends AbstractTunnel {
       this.iter();
     });
     this.demuxServer.on("timeout", () => {
-      this.log({ demuxServerTimeout: true });
+      this.log({ demuxServer: "timeout" });
     });
     this.demuxServer.on("sessionError", (err) => {
-      this.log({ demuxServerSessionError: err });
+      this.log({ demuxServer: "sessionError", err });
     });
     this.demuxServer.on("clientError", (err) => {
-      this.log({ demuxServerClientError: err });
+      this.log({ demuxServer: "clientError", err });
     });
     this.demuxServer.on("unknownProtocol", () => {
-      this.log({ demuxServerUnknownProtocol: true });
+      this.log({ demuxServer: "unknownProtocol" });
     });
     this.demuxServer.on("session", (session: http2.ServerHttp2Session) => {
       this.demuxSession = session;
       this.demuxSession.on("error", (err) => {
-        this.log({ demuxSessionError: err });
+        this.log({ demuxSession: "error", err });
         this.demuxSession = null;
         this.iter();
       });
       this.demuxSession.on("close", () => {
-        this.log({ demuxSessionClose: true });
+        this.log({ demuxSession: "close" });
         this.demuxSession = null;
         this.iter();
       });
@@ -500,8 +495,8 @@ export class TunnelClient extends AbstractTunnel {
         ) => {
           const method = headers[http2.constants.HTTP2_HEADER_METHOD] as string;
           const path = headers[http2.constants.HTTP2_HEADER_PATH] as string;
-          this.log({ http21ProxyRequest: { method, path } });
-          const http1Req = http.request(
+          this.log({ receivingHttp2Request: { method, path } });
+          const req = http.request(
             {
               hostname: "localhost",
               port: this.options.localHttpPort,
@@ -511,36 +506,39 @@ export class TunnelClient extends AbstractTunnel {
               signal: this.abortController.signal,
             },
             (res: http.IncomingMessage) => {
+              const headers = pruneHttp1Headers(res.headers);
+              this.log({
+                sendingHttp2Response: { status: res.statusCode, headers },
+              });
               stream.respond({
                 [http2.constants.HTTP2_HEADER_STATUS]: res.statusCode,
-                ...pruneHttp1Headers(res.headers),
+                ...headers,
               });
               res.pipe(stream);
             },
           );
-
-          http1Req.on("error", (e) => {
+          req.on("error", (e) => {
             this.log({ http1ReqError: e });
           });
-
-          stream.pipe(http1Req);
+          stream.pipe(req);
         },
       );
       this.iter();
     });
     this.demuxServer.on("listening", () => {
-      this.log({ demuxServerListening: true });
+      this.log({ demuxServer: "listening" });
       this.iter();
     });
     this.demuxServer.listen(this.options.demuxListenPort);
+    this.iter();
   }
 
   get state(): TunnelState {
-    if (this.tunnelSocket === null && this.reverseSocket === null) {
+    if (!this.tunnelSocket && !this.reverseSocket) {
       return "stopped";
     } else if (this.abortController.signal.aborted) {
       return "stopping";
-    } else if (this.socketsLinked && this.demuxSession !== null) {
+    } else if (this.socketsLinked && this.demuxSession) {
       return "connected";
     } else if (this.demuxServer?.listening) {
       return "listening";
@@ -575,9 +573,9 @@ export class TunnelClient extends AbstractTunnel {
         return;
       }
       if (
-        this.reverseSocket !== null &&
+        this.reverseSocket &&
         this.reverseSocketConnected &&
-        this.tunnelSocket !== null &&
+        this.tunnelSocket &&
         this.tunnelSocketConnected &&
         !this.socketsLinked
       ) {

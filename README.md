@@ -3,46 +3,46 @@
 ![NPM Version](https://img.shields.io/npm/v/h2tunnel)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/boronine/h2tunnel/node.js.yml)
 
-A low level tool for a popular "tunneling" workflow, similar to the proprietary [ngrok](https://ngrok.com/)
+A CLI tool and Node.js library for a popular "tunneling" workflow, similar to the proprietary [ngrok](https://ngrok.com/)
 or the openssh-based `ssh -L` solution. All in [less than 600 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
 with no dependencies.
 
-![Diagram](https://raw.githubusercontent.com/boronine/h2tunnel/main/diagram.drawio.svg)]
+![Diagram](https://raw.githubusercontent.com/boronine/h2tunnel/main/diagram.drawio.svg)
 
 ## The "tunneling" workflow
 
 This workflow allows exposing your localhost development server to the internet. This requires a server component 
 hosted on a public IP address, and a client component running on your local machine. The client establishes a tunnel
-to the server, and the server acts as a reverse proxy, tunneling requests back to your local machine.
+to the server, and the server proxies requests through this tunnel to your local machine.
 
 ## How does h2tunnel work?
 
-1. The client initiates a TLS connection (tunnel) to the server
-2. The server takes the newly created TLS socket and tunnels an HTTP2 session through it back to the client
-3. The client listens for an HTTP2 connection on the socket from which it initiated the TLS tunnel
-4. The server starts accepting HTTP1 requests and converts them into HTTP2 requests before sending them to the client
-5. The client receives these HTTP2 requests and converts them back into HTTP1 requests to feed them into the local server
+1. The client initiates a TLS connection to the server and starts listening for HTTP2 sessions on it
+2. The server takes the newly created TLS socket and initiates an HTTP2 session through it
+3. The server starts accepting HTTP1 requests, converting them into HTTP2 requests, and fowarding them to the client
+4. The client receives these HTTP2 requests and converts them back into HTTP1 requests to feed them into the local server
 
-The reason for using HTTP2 is that it allows multiplexing: processing simultaneous HTTP requests over a single connection.
-By using HTTP2 we avoid having to reinvent this wheel. 
+Converting between HTTP1 and HTTP2 is necessary to take advantage of HTTP2's multiplexing capabilities. This feature of
+the protocol allows simultaneous requests to be processed on a single TCP connection.
 
-Similarly we avoid having to reinvent authentication by using a self-signed TLS certificate + private key pair. This 
-pair is used by both the client and the server, and both are configured to reject any other certificate. This way, the
-pair effectively becomes a shared password.
+For authentication we use a self-signed TLS certificate + private key pair. This pair is used by both the client and 
+the server, and both are configured to reject anything else. This way, the pair effectively becomes a shared password.
 
 ## Usage
 
-### Forward localhost:8000 to http://example.com
-
-Generate `.key` and `.crt` files. These will be used by both client and server to authenticate each other.
+Generate `h2tunnel.key` and `h2tunnel.crt` files using `openssl` command:
 
 ```bash
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=example.com"
 ```
 
+### Forward localhost:8000 to http://example.com
+
 On your server (example.com), we will be listening for tunnel connections on port 15001, and providing an HTTP proxy 
-on port 80. Make sure these are open in your firewall. `--mux-listen-port` can be any available port, it is necessary
-to run a local HTTP2 multiplexer (always bound to 127.0.0.1).
+on port 80. Make sure these are open in your firewall.
+
+Use any port for `--mux-listen-port`, h2tunnel will run an HTTP2 multiplexer on this port bound to 127.0.0.1,
+it will not be exposed to the internet even if your firewall allows it.
 
 ```bash
 sudo h2tunnel server \
@@ -50,19 +50,20 @@ sudo h2tunnel server \
   --key h2tunnel.key \
   --tunnel-listen-ip 0.0.0.0 \
   --tunnel-listen-port 15001 \
-  --proxy-listen-port 80 \
   --proxy-listen-ip 0.0.0.0 \
+  --proxy-listen-port 80 \
   --mux-listen-port=15002
 ````
 
-On your local machine, we will connect to the tunnel and forward a local HTTP server on port 8000. `--demux-listen-port`
-can be any available port, it is necessary to run a local HTTP2 demultiplexer (always bound to 127.0.0.1).
+On your local machine, we will connect to the tunnel and forward a local HTTP server on port 8000. 
+
+Use any port for `--demux-listen-port`, h2tunnel will run an HTTP2 demultiplexer on it.
 
 ```bash
 python3 -m http.server # runs on port 8000
 h2tunnel client \
-  --key h2tunnel.key \
   --crt h2tunnel.crt \
+  --key h2tunnel.key \
   --tunnel-host=example.com \
   --tunnel-port=15001 \
   --local-http-port=8000 \
