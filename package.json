@@ -52,8 +52,10 @@
   "scripts": {
     "format": "npx prettier --write .",
     "build": "npx tsc",
-    "test": "npx tsc && node --enable-source-maps --test --experimental-test-coverage build/h2tunnel.test.js",
-    "test_only": "npx tsc && node --enable-source-maps --test --experimental-test-coverage --test-only build/h2tunnel.test.js",
+    "test": "npx tsc && node --enable-source-maps --test build/h2tunnel.test.js",
+    "test_only": "npx tsc && node --enable-source-maps --test --test-only build/h2tunnel.test.js",
+    "test_ipv4": "npx tsc && node --enable-source-maps --test --test-name-pattern ipv4 build/h2tunnel.test.js",
+    "test_ipv4_docker": "docker run --rm --sysctl net.ipv6.conf.all.disable_ipv6=1 -e TIME_MULTIPLIER -v ./:/app -w /app node:22 npm run test_ipv4",
     "coverage": "npx tsc && c8 --reporter html node --enable-source-maps --test build/h2tunnel.test.js"
   },
   "engines": {

@@ -170,7 +170,7 @@ export abstract class AbstractTunnel<
   start() {
     this.aborted = false;
     this.addCloseable(this.muxServer);
-    this.muxServer.listen(0); // Let the OS pick a port
+    this.muxServer.listen(0, "127.0.0.1"); // Let the OS pick a port, use IPv4 because it's almost always available
   }
 
   async stop() {

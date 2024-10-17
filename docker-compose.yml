@@ -17,7 +17,7 @@ services:
       - /data
       - /config
   h2tunnel:
-    build: .
+    image: node:22
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
@@ -27,7 +27,9 @@ services:
     ports:
       - "80" # for caddy
       - "15900:15900"
-    command: h2tunnel server --crt /run/secrets/crt --key /run/secrets/key --proxy-listen-port 80
+    volumes:
+      - $PWD/build:/h2tunnel
+    command: node h2tunnel/cli.js server --crt /run/secrets/crt --key /run/secrets/key --proxy-listen-port 80
 secrets:
   crt:
     file: ./h2tunnel.crt

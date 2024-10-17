@@ -1,3 +1,7 @@
+### 0.4.1
+
+- Fix for IPv4 only environments (e.g. default docker-compose)
+
 ### 0.4.0
 
 - Clean up logging

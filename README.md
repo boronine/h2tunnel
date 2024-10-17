@@ -139,6 +139,10 @@ Push the necessary files to the server:
 scp .env Caddyfile Dockerfile docker-compose.yml h2tunnel.crt h2tunnel.key myuser@mysite.example.com:/home/myuser
 ```
 
+```bash
+npx tsc && scp -r h2tunnel.key h2tunnel.crt Dockerfile Caddyfile build docker-compose.yml boronine-ginernet-es-1-workstation:/home/alexei
+```
+
 Start the server:
 
 ```bash
