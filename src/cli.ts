@@ -73,7 +73,7 @@ usage: h2tunnel <command> [options]
 commands:
   client
   server
- 
+
 client options:
   --${"crt" satisfies Param} <path>                 Path to certificate file (.crt)
   --${"key" satisfies Param} <path>                 Path to private key file (.key)

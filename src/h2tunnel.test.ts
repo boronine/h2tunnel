@@ -1,6 +1,12 @@
 import { test, TestContext } from "node:test";
+import child_process from "node:child_process";
 import assert from "node:assert";
+import fs from "node:fs";
+import os from "node:os";
 import net from "node:net";
+import path from "node:path";
+import stream from "node:stream";
+import readline from "node:readline";
 import {
   ClientOptions,
   LogLine,
@@ -26,16 +32,18 @@ const TUNNEL2_PORT = 15008;
 // Reduce this to make tests faster
 const TIME_MULTIPLIER = Number(process.env["TIME_MULTIPLIER"] ?? "0.1");
 
+const TEST_TIMEOUT = 100000 * TIME_MULTIPLIER;
+
 // This keypair is issued for example.com: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=example.com"
 
-const CLIENT_KEY_EXAMPLECOM = `-----BEGIN PRIVATE KEY-----
+const TLS_KEY_EXAMPLECOM = `-----BEGIN PRIVATE KEY-----
 MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDCDzcLnOqzvCrnUyd4P
 1QcIG/Xi/VPpA5dVIwPVkutr9y/wZo3aJsYUX5xExQMsEeihZANiAAQfSPquV3P/
 uhHm2D5czJoFyldutJrQswri0brL99gHSsOmQ34cH7bddcSTVToAZfwkv2yEZPNf
 eLM7tASBpINt8uuOjJhCp034thS1V0HH/qDEHzEfy5wZEDrwevuzD+k=
 -----END PRIVATE KEY-----`;
 
-const CLIENT_CRT_EXAMPLECOM = `-----BEGIN CERTIFICATE-----
+const TLS_CRT_EXAMPLECOM = `-----BEGIN CERTIFICATE-----
 MIIB7DCCAXKgAwIBAgIUIyesgpQMVroHhiDuFa56b+bf7UwwCgYIKoZIzj0EAwIw
 FjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wHhcNMjQwNTMwMTAzMTM3WhcNMzQwNTI4
 MTAzMTM3WjAWMRQwEgYDVQQDDAtleGFtcGxlLmNvbTB2MBAGByqGSM49AgEGBSuB
@@ -49,16 +57,22 @@ JN+yjDEXE/TgT+bxgfcCMFFZkqT7GYLc18lW6sv6GZvhzFPV8eTePa2xwVyBgaca
 93vJMc5HXDLt7XPK+Iz90g==
 -----END CERTIFICATE-----`;
 
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "h2tunnel-test-"));
+const TLS_KEY_FILE = path.join(tmpDir, "h2tunnel.key");
+const TLS_CRT_FILE = path.join(tmpDir, "h2tunnel.crt");
+fs.writeFileSync(TLS_KEY_FILE, TLS_KEY_EXAMPLECOM);
+fs.writeFileSync(TLS_CRT_FILE, TLS_CRT_EXAMPLECOM);
+
 // This keypair is issued for localhost: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=localhost"
 
-const CLIENT_KEY_LOCALHOST = `-----BEGIN PRIVATE KEY-----
+const TLS_KEY_LOCALHOST = `-----BEGIN PRIVATE KEY-----
 MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDDittBDK95KNEY62DbX
 7YdaqtpqEVJLt+6fg1CIhkbDd8ZtrZLF98d8o0qTBJyr/xuhZANiAAShciJg7L29
 VczOqPMG1YmTOh5t9ZfEwCQRqaQcUuilm5uFGf4eZbx3cyc3YypvjONIykSMPShM
 NeCoOEX13zU5d5vJb01zEpBijunhS0/YD08kmLvq7S8pR6TPlzCiDqc=
 -----END PRIVATE KEY-----`;
 
-const CLIENT_CRT_LOCALHOST = `-----BEGIN CERTIFICATE-----
+const TLS_CRT_LOCALHOST = `-----BEGIN CERTIFICATE-----
 MIIBujCCAUCgAwIBAgIUB/l/jY39X+YnVsApRJ2qF7fLYlYwCgYIKoZIzj0EAwIw
 FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI1MDIwNTA5NDAzOVoXDTM1MDIwMzA5
 NDAzOVowFDESMBAGA1UEAwwJbG9jYWxob3N0MHYwEAYHKoZIzj0CAQYFK4EEACID
@@ -120,8 +134,8 @@ const TIMEOUT = 5000;
 
 const DEFAULT_SERVER_OPTIONS: ServerOptions = {
   logger: getLogger("server", 32),
-  key: CLIENT_KEY_EXAMPLECOM,
-  cert: CLIENT_CRT_EXAMPLECOM,
+  key: TLS_KEY_EXAMPLECOM,
+  cert: TLS_CRT_EXAMPLECOM,
   tunnelListenIp: "::1",
   tunnelListenPort: TUNNEL_PORT,
   proxyListenIp: "::1",
@@ -130,8 +144,8 @@ const DEFAULT_SERVER_OPTIONS: ServerOptions = {
 
 const DEFAULT_CLIENT_OPTIONS: ClientOptions = {
   logger: getLogger("client", 33),
-  key: CLIENT_KEY_EXAMPLECOM,
-  cert: CLIENT_CRT_EXAMPLECOM,
+  key: TLS_KEY_EXAMPLECOM,
+  cert: TLS_CRT_EXAMPLECOM,
   tunnelHost: "::1",
   tunnelPort: TUNNEL_PORT,
   originHost: "::1",
@@ -562,8 +576,8 @@ async function testHalfClosed(t: TestContext, params: EndToEndTestParams) {
 await test("localhost and non-localhost key/crt pairs", {}, async (t) => {
   // Localhost certificate support is ensured by this option: https://nodejs.org/api/tls.html#tlsconnectoptions-callback
   const PAIRS: Partial<ClientOptions>[] = [
-    { key: CLIENT_KEY_EXAMPLECOM, cert: CLIENT_CRT_EXAMPLECOM },
-    { key: CLIENT_KEY_LOCALHOST, cert: CLIENT_CRT_LOCALHOST },
+    { key: TLS_KEY_EXAMPLECOM, cert: TLS_CRT_EXAMPLECOM },
+    { key: TLS_KEY_LOCALHOST, cert: TLS_CRT_LOCALHOST },
   ];
   for (const pair of PAIRS) {
     await t.test(async (t) => {
@@ -576,7 +590,7 @@ await test("localhost and non-localhost key/crt pairs", {}, async (t) => {
   }
 });
 
-await test("logging test", { timeout: 100000 * TIME_MULTIPLIER }, async (t) => {
+await test("logging test", { timeout: TEST_TIMEOUT }, async (t) => {
   await setupClientAndServer(t, {}, {});
   const echo = new EchoOriginAndBrowser();
   t.after(() => echo.stop());
@@ -668,78 +682,70 @@ await test("logging test", { timeout: 100000 * TIME_MULTIPLIER }, async (t) => {
   ]);
 });
 
-await test(
-  "test-testing-utils",
-  { timeout: 100000 * TIME_MULTIPLIER },
-  async (t) => {
-    for (const localIp of ["127.0.0.1", "::1"]) {
-      // Run EchoServer tests without proxy or tunnel
-      await t.test(
-        `test-echo-server-no-proxy-no-tunnel-${localIp}`,
-        async (t) => {
-          await testHalfClosed(t, {
-            originListenHost: localIp,
-            originListenPort: LOCAL_PORT,
-            proxyHost: localIp,
-            proxyPort: LOCAL_PORT,
-          });
-        },
-      );
-
-      await t.test(
-        `test-network-emulator-using-echo-server-${localIp}`,
-        async (t) => {
-          // Test NetworkEmulator using EchoServer
-          const net = new NetworkEmulator({
-            listenHost: localIp,
-            listenPort: LOCAL2_PORT,
-            forwardHost: localIp,
-            forwardPort: LOCAL_PORT,
-          });
-          t.after(() => net.stop());
-          await net.startAndWaitUntilReady();
-          await testHalfClosed(t, {
-            originListenHost: localIp,
-            originListenPort: LOCAL_PORT,
-            proxyHost: localIp,
-            proxyPort: LOCAL2_PORT,
-          });
-        },
-      );
-    }
-  },
-);
-
-await test(
-  "test-half-closed",
-  { timeout: 100000 * TIME_MULTIPLIER },
-  async (t) => {
-    for (const localIp of ["127.0.0.1", "::1"]) {
-      await t.test(`half-closed-${localIp}`, async (t) => {
-        // Test EchoServer through default tunnel
-        await setupClientAndServer(
-          t,
-          {
-            originHost: localIp,
-            tunnelHost: localIp,
-          },
-          {
-            tunnelListenIp: localIp,
-            proxyListenIp: localIp,
-          },
-        );
+await test("test-testing-utils", { timeout: TEST_TIMEOUT }, async (t) => {
+  for (const localIp of ["127.0.0.1", "::1"]) {
+    // Run EchoServer tests without proxy or tunnel
+    await t.test(
+      `test-echo-server-no-proxy-no-tunnel-${localIp}`,
+      async (t) => {
         await testHalfClosed(t, {
           originListenHost: localIp,
           originListenPort: LOCAL_PORT,
           proxyHost: localIp,
-          proxyPort: PROXY_PORT,
+          proxyPort: LOCAL_PORT,
         });
-      });
-    }
-  },
-);
+      },
+    );
 
-await test("happy-path", { timeout: 10000 * TIME_MULTIPLIER }, async (t) => {
+    await t.test(
+      `test-network-emulator-using-echo-server-${localIp}`,
+      async (t) => {
+        // Test NetworkEmulator using EchoServer
+        const net = new NetworkEmulator({
+          listenHost: localIp,
+          listenPort: LOCAL2_PORT,
+          forwardHost: localIp,
+          forwardPort: LOCAL_PORT,
+        });
+        t.after(() => net.stop());
+        await net.startAndWaitUntilReady();
+        await testHalfClosed(t, {
+          originListenHost: localIp,
+          originListenPort: LOCAL_PORT,
+          proxyHost: localIp,
+          proxyPort: LOCAL2_PORT,
+        });
+      },
+    );
+  }
+});
+
+await test("test-half-closed", { timeout: TEST_TIMEOUT }, async (t) => {
+  for (const localIp of ["127.0.0.1", "::1"]) {
+    await t.test(`half-closed-${localIp}`, async (t) => {
+      // Test EchoServer through default tunnel
+      await setupClientAndServer(
+        t,
+        {
+          originHost: localIp,
+          tunnelHost: localIp,
+        },
+        {
+          tunnelListenIp: localIp,
+          proxyListenIp: localIp,
+        },
+      );
+      await testHalfClosed(t, {
+        originListenHost: localIp,
+        originListenPort: LOCAL_PORT,
+        proxyHost: localIp,
+        proxyPort: PROXY_PORT,
+      });
+    });
+  }
+});
+
+await test("happy-path", { timeout: TEST_TIMEOUT }, async (t) => {
   const { client, server } = await setupClientAndServer(t, {}, {});
   const echo = new EchoOriginAndBrowser();
   t.after(() => echo.stop());
@@ -832,7 +838,7 @@ await test("use-before-ready", async () => {
 
 await test(
   "restart-client-while-server-running",
-  { timeout: 10000 * TIME_MULTIPLIER },
+  { timeout: TEST_TIMEOUT },
   async (t) => {
     const { client, server } = await setupClientAndServer(t, {}, {});
     const echo = new EchoOriginAndBrowser();
@@ -867,7 +873,7 @@ await test(
 
 await test(
   "restart-server-while-client-running",
-  { timeout: 10000 * TIME_MULTIPLIER },
+  { timeout: TEST_TIMEOUT },
   async (t) => {
     const { client, server } = await setupClientAndServer(t, {}, {});
     const echo = new EchoOriginAndBrowser();
@@ -901,7 +907,7 @@ await test(
   },
 );
 
-await test("bad-network", { timeout: 100000 * TIME_MULTIPLIER }, async (t) => {
+await test("bad-network", { timeout: TEST_TIMEOUT }, async (t) => {
   LOG_LINES = [];
   const echo = new EchoOriginAndBrowser();
   t.after(() => echo.stop());
@@ -1026,127 +1032,115 @@ await test("bad-network", { timeout: 100000 * TIME_MULTIPLIER }, async (t) => {
   ]);
 });
 
-await test(
-  "garbage-to-client",
-  { timeout: 10000 * TIME_MULTIPLIER },
-  async (t) => {
-    const echoServer = new EchoOriginAndBrowser();
-    t.after(() => echoServer.stop());
-    await echoServer.startAndWaitUntilListening();
-    const stopBadServer = await createBadTlsServer(TUNNEL_PORT);
-    t.after(stopBadServer);
-    const client = new TunnelClient(DEFAULT_CLIENT_OPTIONS);
-    t.after(() => client.stop());
-    client.start();
+await test("garbage-to-client", { timeout: TEST_TIMEOUT }, async (t) => {
+  const echoServer = new EchoOriginAndBrowser();
+  t.after(() => echoServer.stop());
+  await echoServer.startAndWaitUntilListening();
+  const stopBadServer = await createBadTlsServer(TUNNEL_PORT);
+  t.after(stopBadServer);
+  const client = new TunnelClient(DEFAULT_CLIENT_OPTIONS);
+  t.after(() => client.stop());
+  client.start();
 
-    // Still no connection after a second
-    await sleep(1000);
-    await echoServer.expectEconn();
-    assert.strictEqual(client.activeSession, null);
+  // Still no connection after a second
+  await sleep(1000);
+  await echoServer.expectEconn();
+  assert.strictEqual(client.activeSession, null);
 
-    // Let the network recover and make a successful connection
-    await stopBadServer();
-    const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
-    t.after(() => server.stop());
-    server.start();
+  // Let the network recover and make a successful connection
+  await stopBadServer();
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+  t.after(() => server.stop());
+  server.start();
 
-    await server.waitUntilConnected();
-    await echoServer.expectPingPongAndClose();
-  },
-);
+  await server.waitUntilConnected();
+  await echoServer.expectPingPongAndClose();
+});
 
-await test(
-  "garbage-to-server",
-  { timeout: 10000 * TIME_MULTIPLIER },
-  async (t) => {
-    const echoServer = new EchoOriginAndBrowser();
-    t.after(() => echoServer.stop());
-    await echoServer.startAndWaitUntilListening();
-    const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
-    t.after(() => server.stop());
-    server.start();
-    await server.waitUntilListening();
+await test("garbage-to-server", { timeout: TEST_TIMEOUT }, async (t) => {
+  const echoServer = new EchoOriginAndBrowser();
+  t.after(() => echoServer.stop());
+  await echoServer.startAndWaitUntilListening();
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+  t.after(() => server.stop());
+  server.start();
+  await server.waitUntilListening();
 
-    // Still no connection after a second
-    const stopBadClient = await createBadTlsClient(TUNNEL_PORT);
-    t.after(stopBadClient);
-    await sleep(1000);
-    await echoServer.expectEconn();
-    assert.strictEqual(server.activeSession, null);
+  // Still no connection after a second
+  const stopBadClient = await createBadTlsClient(TUNNEL_PORT);
+  t.after(stopBadClient);
+  await sleep(1000);
+  await echoServer.expectEconn();
+  assert.strictEqual(server.activeSession, null);
 
-    // Let the network recover and make a successful connection
-    await stopBadClient();
-    const client = new TunnelClient(DEFAULT_CLIENT_OPTIONS);
-    t.after(() => client.stop());
-    client.start();
-    await server.waitUntilConnected();
-    await echoServer.expectPingPongAndClose();
-  },
-);
+  // Let the network recover and make a successful connection
+  await stopBadClient();
+  const client = new TunnelClient(DEFAULT_CLIENT_OPTIONS);
+  t.after(() => client.stop());
+  client.start();
+  await server.waitUntilConnected();
+  await echoServer.expectPingPongAndClose();
+});
 
-await test(
-  "latest-client-wins",
-  { timeout: 10000 * TIME_MULTIPLIER },
-  async (t) => {
-    const echoServer = new EchoOriginAndBrowser();
-    t.after(() => echoServer.stop());
-    await echoServer.startAndWaitUntilListening();
-    const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
-    t.after(() => server.stop());
-    server.start();
-    await server.waitUntilListening();
+await test("latest-client-wins", { timeout: TEST_TIMEOUT }, async (t) => {
+  const echoServer = new EchoOriginAndBrowser();
+  t.after(() => echoServer.stop());
+  await echoServer.startAndWaitUntilListening();
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+  t.after(() => server.stop());
+  server.start();
+  await server.waitUntilListening();
 
-    const client1 = new TunnelClient({
-      ...DEFAULT_CLIENT_OPTIONS,
-      logger: getLogger("client1", 33),
-    });
-    t.after(() => client1.stop());
-    const client2 = new TunnelClient({
-      ...DEFAULT_CLIENT_OPTIONS,
-      logger: getLogger("client2", 33),
-    });
-    t.after(() => client2.stop());
+  const client1 = new TunnelClient({
+    ...DEFAULT_CLIENT_OPTIONS,
+    logger: getLogger("client1", 33),
+  });
+  t.after(() => client1.stop());
+  const client2 = new TunnelClient({
+    ...DEFAULT_CLIENT_OPTIONS,
+    logger: getLogger("client2", 33),
+  });
+  t.after(() => client2.stop());
 
-    client1.start();
+  client1.start();
 
-    await client1.waitUntilConnected();
-    await server.waitUntilConnected();
+  await client1.waitUntilConnected();
+  await server.waitUntilConnected();
 
-    await echoServer.expectPingPongAndClose();
+  await echoServer.expectPingPongAndClose();
 
-    LOG_LINES = [];
+  LOG_LINES = [];
 
-    client2.start();
-    await client2.waitUntilConnected();
-    await server.waitUntilConnected();
+  client2.start();
+  await client2.waitUntilConnected();
+  await server.waitUntilConnected();
 
-    await echoServer.expectPingPongAndClose();
+  await echoServer.expectPingPongAndClose();
 
-    assertLastLines([
-      "client2   connecting",
-      "server   disconnected",
-      "client1   disconnected",
-      `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-      `client2   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-      "server   stream0 forwarded from [::1]:00",
-      "client2   stream0 forwarding to [::1]:00",
-      "server   stream0 send 1",
-      "client2   stream0 recv 1",
-      "client2   stream0 send 1",
-      "server   stream0 recv 1",
-      "server   stream0 send FIN",
-      "client2   stream0 recv FIN",
-      "client2   stream0 send 1",
-      "client2   stream0 send FIN",
-      "client2   stream0 closed",
-      "server   stream0 recv 1",
-      "server   stream0 recv FIN",
-      "server   stream0 closed",
-    ]);
-  },
-);
+  assertLastLines([
+    "client2   connecting",
+    "server   disconnected",
+    "client1   disconnected",
+    `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    `client2   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    "server   stream0 forwarded from [::1]:00",
+    "client2   stream0 forwarding to [::1]:00",
+    "server   stream0 send 1",
+    "client2   stream0 recv 1",
+    "client2   stream0 send 1",
+    "server   stream0 recv 1",
+    "server   stream0 send FIN",
+    "client2   stream0 recv FIN",
+    "client2   stream0 send 1",
+    "client2   stream0 send FIN",
+    "client2   stream0 closed",
+    "server   stream0 recv 1",
+    "server   stream0 recv FIN",
+    "server   stream0 closed",
+  ]);
+});
 
-await test("addr-in-use", { timeout: 10000 * TIME_MULTIPLIER }, async (t) => {
+await test("addr-in-use", { timeout: TEST_TIMEOUT }, async (t) => {
   const server1 = new TunnelServer(DEFAULT_SERVER_OPTIONS);
   const server2 = new TunnelServer(DEFAULT_SERVER_OPTIONS);
   t.after(() => server1.stop());
@@ -1157,4 +1151,90 @@ await test("addr-in-use", { timeout: 10000 * TIME_MULTIPLIER }, async (t) => {
   await assert.rejects(() => server2.waitUntilListening(), {
     message: /EADDRINUSE/,
   });
+});
+
+function spawnServer(): child_process.ChildProcessByStdio<
+  stream.Writable,
+  stream.Readable,
+  stream.Readable
+> {
+  return child_process.spawn(
+    process.execPath,
+    [
+      path.join("build", "cli.js"),
+      "server",
+      "--crt",
+      TLS_CRT_FILE,
+      "--key",
+      TLS_KEY_FILE,
+      "--tunnel-listen-ip",
+      "::1",
+      "--tunnel-listen-port",
+      TUNNEL_PORT.toString(),
+      "--proxy-listen-port",
+      PROXY_PORT.toString(),
+    ],
+    {
+      // timeout: 1000,
+      stdio: "pipe",
+    },
+  );
+}
+
+async function expectExitCode(
+  child: child_process.ChildProcess,
+  expected: number | null,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    child.on("exit", (code) => {
+      console.log("child.exitCode", child.exitCode);
+      if (code === expected) {
+        resolve();
+      } else {
+        reject(new Error(`Unexpected exit code ${code}`));
+      }
+    });
+  });
+}
+
+await test("cli-exit-1", { timeout: TEST_TIMEOUT }, async (t) => {
+  const child1 = spawnServer();
+  t.after(() => child1.kill());
+
+  // Wait until listening
+  await new Promise<void>((resolve) => {
+    readline.createInterface({ input: child1.stdout }).on("line", (line) => {
+      if (line === "listening") {
+        resolve();
+      }
+    });
+  });
+
+  const child2 = spawnServer();
+  t.after(() => child2.kill());
+
+  // Expect exit code 1 because address is already in use
+  await expectExitCode(child2, 1);
+});
+
+await test("cli-exit-sigterm-sigint", { timeout: TEST_TIMEOUT }, async (t) => {
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    const child = spawnServer();
+    t.after(() => child.kill());
+
+    const rl = readline.createInterface({ input: child.stdout });
+
+    // Wait until listening
+    await new Promise<void>((resolve) => {
+      rl.on("line", (line) => {
+        if (line === "listening") {
+          resolve();
+        }
+      });
+    });
+
+    child.kill(signal);
+
+    await expectExitCode(child, 0);
+  }
 });
