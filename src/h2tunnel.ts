@@ -122,16 +122,7 @@ export abstract class AbstractTunnel<
 
   addDemuxSocket(socket: net.Socket, stream: http2.Http2Stream): void {
     const log = (line: object) => {
-      this.log({
-        streamId: stream.id,
-        streamWritableEnd: stream.writableEnded,
-        socketWritableEnd: socket.writableEnded,
-        streamDestroyed: stream.destroyed,
-        socketDestroyed: socket.destroyed,
-        streamError: stream.errored,
-        socketError: socket.errored,
-        ...line,
-      });
+      this.log({ streamId: stream.id, ...line });
     };
     log({ demux: "added" });
 
@@ -145,12 +136,10 @@ export abstract class AbstractTunnel<
         duplex2.write(chunk);
       });
       // Catch error but do not handle it, we will handle it later during the 'close' event
-      duplex1.on("error", () => {
-        log({ [tag]: "error" });
-      });
+      duplex1.on("error", () => {});
       let endTimeout: NodeJS.Timeout | null = null;
       duplex1.on("end", () => {
-        log({ [tag]: "end", ts: new Date().getTime() });
+        log({ [tag]: "end" });
         if (!duplex2.writableEnded) {
           log({ [tag]: "closing opposite" });
           duplex2.end();
@@ -158,8 +147,12 @@ export abstract class AbstractTunnel<
       });
 
       duplex1.on("close", () => {
-        log({ [tag]: "close", ts: new Date().getTime() });
-        if (duplex1.errored && !duplex2.closed) {
+        log({
+          [tag]: "close",
+          errored: duplex1.errored,
+          oppositeAlreadyDestroyed: duplex2.destroyed,
+        });
+        if (duplex1.errored && !duplex2.destroyed) {
           if (endTimeout) {
             clearTimeout(endTimeout);
           }
@@ -263,7 +256,7 @@ export class TunnelServer extends AbstractTunnel<
   ) {
     super(options.logger, net.createServer());
     this.muxServer.on("connection", (socket: net.Socket) => {
-      this.log({ muxServer: "connection" });
+      this.log({ muxServer: "connection", address: socket.address() });
       this.setMuxSocket(socket);
       this.updateHook();
     });
