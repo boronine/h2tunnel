@@ -96,7 +96,7 @@ if (positionals.length === 0) {
   process.stdout.write(HELP_TEXT);
 } else {
   const command = positionals[0];
-  let tunnel: AbstractTunnel;
+  let tunnel: AbstractTunnel<any, any>;
   if (command === "client") {
     tunnel = new TunnelClient({
       tunnelHost: getString("tunnel-host"),
@@ -120,8 +120,8 @@ if (positionals.length === 0) {
     throw new Error(`Unknown command: ${command}`);
   }
 
-  process.on("SIGINT", () => tunnel.abortController.abort());
-  process.on("SIGTERM", () => tunnel.abortController.abort());
+  process.on("SIGINT", () => tunnel.stop());
+  process.on("SIGTERM", () => tunnel.stop());
   tunnel.start();
   await tunnel.waitUntilState("stopped");
 }

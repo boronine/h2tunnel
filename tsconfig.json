@@ -18,9 +18,7 @@
     "outDir": "build",
     "strictNullChecks": true
   },
-  "files": [
-    "src/h2tunnel.ts",
-    "src/h2tunnel.test.ts",
-    "src/cli.ts"
+  "include": [
+    "src/*"
   ]
 }

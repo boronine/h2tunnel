@@ -4,7 +4,7 @@
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/boronine/h2tunnel/node.js.yml)
 
 A CLI tool and Node.js library for a popular "tunneling" workflow, similar to the proprietary [ngrok](https://ngrok.com/)
-or the openssh-based `ssh -L` solution. All in [less than 700 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
+or the openssh-based `ssh -L` solution. All in [less than 500 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
 with no dependencies.
 
 ![Diagram](https://raw.githubusercontent.com/boronine/h2tunnel/main/diagram.drawio.svg)
@@ -19,11 +19,11 @@ to the server, and the server proxies requests through this tunnel to your local
 
 1. The client initiates a TLS connection to the server and starts listening for HTTP2 sessions on it
 2. The server takes the newly created TLS socket and initiates an HTTP2 session through it
-3. The server starts accepting HTTP1 requests, converting them into HTTP2 requests, and fowarding them to the client
-4. The client receives these HTTP2 requests and converts them back into HTTP1 requests to feed them into the local server
+3. The server starts accepting TCP connections, converting them into HTTP2 streams, and fowarding them to the client
+4. The client receives these HTTP2 streams and converts them back into TCP connections to feed them into the local server
 
-Converting between HTTP1 and HTTP2 is necessary to take advantage of HTTP2's multiplexing capabilities. This feature of
-the protocol allows simultaneous requests to be processed on a single TCP connection.
+The purpose of using HTTP2 is to take advantage of its multiplexing capabilities. This feature of the protocol allows 
+simultaneous requests to be processed on a single TCP connection.
 
 For authentication we use a self-signed TLS certificate + private key pair. This pair is used by both the client and 
 the server, and both are configured to reject anything else. This way, the pair effectively becomes a shared password.
@@ -144,4 +144,27 @@ await server.stop();
 
 ```bash
 npm run test
+npm run coverage
 ```
+
+## Changelog
+
+### 0.2.0
+
+- Tunnel TCP instead of HTTP1, supporting a wide range of protocols
+- Prevent double TLS encryption by using Node.js unencrypted HTTP2 connection
+- Lots of testing improvements
+- Reduce code size to <500 LOC
+
+### 0.1.1
+
+- Improved testing and reconnection logic
+
+### 0.1.0
+
+- Proof of concept
+- Supports tunneling HTTP1 over HTTP2 + TLS
+
+## License
+
+See [LICENSE](./LICENSE) file for full text.

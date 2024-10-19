@@ -40,7 +40,8 @@
   "scripts": {
     "format": "npx prettier --write .",
     "build": "npx tsc",
-    "test": "npx tsc && node --enable-source-maps --experimental-test-coverage --test build/h2tunnel.test.js",
+    "test": "npx tsc && node --enable-source-maps --test --experimental-test-coverage build/h2tunnel.test.js",
+    "test_only": "npx tsc && node --enable-source-maps --test --experimental-test-coverage --test-only build/h2tunnel.test.js",
     "coverage": "npx tsc && c8 --reporter html node build/h2tunnel.test.js"
   },
   "engines": {
