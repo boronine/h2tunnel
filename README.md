@@ -4,7 +4,7 @@
 [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/boronine/h2tunnel/node.js.yml)](https://github.com/boronine/h2tunnel/actions/workflows/node.js.yml)
 
 A CLI tool and Node.js library for a popular "tunneling" workflow, similar to the proprietary [ngrok](https://ngrok.com/)
-or the openssh-based `ssh -L` solution. All in [less than 500 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
+or the openssh-based `ssh -R` solution. All in [less than 500 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
 with no dependencies.
 
 ![Diagram](https://raw.githubusercontent.com/boronine/h2tunnel/main/diagram.drawio.svg)
@@ -17,7 +17,7 @@ to the server, and the server proxies requests through this tunnel to your local
 
 ## How does h2tunnel work?
 
-1. The client initiates a TLS connection to the server and starts listening for HTTP2 sessions on it
+1. The client initiates a TLS connection to the server and starts listening for HTTP2 sessions
 2. The server takes the newly created TLS socket and initiates an HTTP2 session through it
 3. The server starts accepting TCP connections, converting them into HTTP2 streams, and fowarding them to the client
 4. The client receives these HTTP2 streams and converts them back into TCP connections to feed them into the local server
@@ -33,7 +33,7 @@ the server, and both are configured to reject anything else. This way, the pair 
 Generate `h2tunnel.key` and `h2tunnel.crt` files using `openssl` command:
 
 ```bash
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=example.com"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=localhost"
 ```
 
 ### Forward localhost:8000 to http://example.com

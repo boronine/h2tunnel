@@ -2,6 +2,7 @@ import net from "node:net";
 import events from "node:events";
 import * as http2 from "node:http2";
 import * as tls from "node:tls";
+import stream from "node:stream";
 
 export type TunnelState = "listening" | "connected" | "stopped" | "stopping";
 
@@ -63,20 +64,11 @@ export abstract class AbstractTunnel<
     });
   }
 
-  destroySockets() {
-    this.muxSocket?.destroy();
-    this.tunnelSocket?.destroy();
-    this.h2session?.destroy();
-    // Session does not get destroyed fast enough, we can have a situation where tunnel is closed but session remains
-    this.h2session = null;
-  }
-
   setH2Session(session: S) {
     this.h2session = session;
     this.h2session.on("close", () => {
       this.log({ h2session: "close" });
       this.h2session = null;
-      this.destroySockets();
       this.updateHook();
     });
     this.h2session.on("error", (err) => {
@@ -110,12 +102,13 @@ export abstract class AbstractTunnel<
 
   setTunnelSocket(socket: tls.TLSSocket) {
     this.tunnelSocket = socket;
-    this.tunnelSocket.on("error", (err) => {
-      this.log({ tunnelSocket: "error", err });
-    });
+    // Error will be handled in the 'close' event below
+    this.tunnelSocket.on("error", () => {});
     this.tunnelSocket.on("close", () => {
-      this.log({ tunnelSocket: "close" });
-      this.destroySockets();
+      this.log({ tunnelSocket: "close", error: socket.errored });
+      this.muxSocket?.destroy();
+      // Make sure error cascades to all active HTTP2 streams
+      this.h2session?.destroy(socket.errored ? new Error() : undefined);
       this.updateHook();
     });
     this.linkSocketsIfNecessary();
@@ -140,49 +133,61 @@ export abstract class AbstractTunnel<
   }
 
   addDemuxSocket(socket: net.Socket, stream: http2.Http2Stream): void {
-    this.log({ demuxSocket: "added", streamId: stream.id });
-    socket.on("data", (chunk) => {
-      this.log({ streamDataWrite: chunk.length, streamId: stream.id });
-      stream.write(chunk);
-    });
-    stream.on("data", (chunk) => {
-      this.log({ streamDataRead: chunk.length, streamId: stream.id });
-      socket.write(chunk);
-    });
-    // Prevent error being logged, we are handling it during the "close" event
-    socket.on("error", () => {});
-    socket.on("close", () => {
+    const log = (line: object) => {
       this.log({
-        demuxSocket: "close",
         streamId: stream.id,
+        streamWritableEnd: stream.writableEnded,
+        socketWritableEnd: socket.writableEnded,
+        streamDestroyed: stream.destroyed,
+        socketDestroyed: socket.destroyed,
         streamError: stream.errored,
         socketError: socket.errored,
+        ...line,
       });
-      if (!stream.destroyed) {
-        if (socket.errored) {
-          stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR);
-        } else {
-          stream.destroy();
-        }
-      }
-    });
-    // Prevent error being logged, we are handling it during the "close" event
-    stream.on("error", () => {});
-    stream.on("close", () => {
-      this.log({
-        demuxStream: "close",
-        streamId: stream.id,
-        streamError: stream.errored,
-        socketError: socket.errored,
+    };
+    log({ demux: "added" });
+
+    const setup = (duplex1: stream.Duplex, duplex2: stream.Duplex) => {
+      const isStream = duplex1 === stream;
+      const tag = isStream ? "demuxStream" : "demuxSocket";
+      duplex1.on("data", (chunk) => {
+        log({
+          [isStream ? "readBytes" : "writeBytes"]: chunk.length,
+        });
+        duplex2.write(chunk);
       });
-      if (!socket.destroyed) {
-        if (stream.errored) {
-          socket.resetAndDestroy();
-        } else {
-          socket.destroy();
+      // Catch error but do not handle it, we will handle it later during the 'close' event
+      duplex1.on("error", () => {
+        log({ [tag]: "error" });
+      });
+      let endTimeout: NodeJS.Timeout | null = null;
+      duplex1.on("end", () => {
+        log({ [tag]: "end", ts: new Date().getTime() });
+        if (!duplex2.writableEnded) {
+          log({ [tag]: "closing opposite" });
+          duplex2.end();
         }
-      }
-    });
+      });
+
+      duplex1.on("close", () => {
+        log({ [tag]: "close", ts: new Date().getTime() });
+        if (duplex1.errored && !duplex2.closed) {
+          if (endTimeout) {
+            clearTimeout(endTimeout);
+          }
+          if (isStream) {
+            log({ [tag]: "destroying socket" });
+            socket.resetAndDestroy();
+          } else {
+            log({ [tag]: "destroying stream" });
+            stream.destroy(new Error());
+          }
+        }
+      });
+    };
+
+    setup(socket, stream);
+    setup(stream, socket);
   }
 
   start() {
@@ -208,7 +213,9 @@ export abstract class AbstractTunnel<
 
   onAbort() {
     this.log({ aborting: true });
-    this.destroySockets();
+    this.muxSocket?.destroy();
+    this.tunnelSocket?.destroy();
+    this.h2session?.destroy();
     this.muxServer?.close();
     this.updateHook();
   }
@@ -244,7 +251,7 @@ export class TunnelServer extends AbstractTunnel<
       // This is necessary only if the client uses a self-signed certificate.
       ca: [options.cert],
     }),
-    readonly proxyServer = net.createServer(),
+    readonly proxyServer = net.createServer({ allowHalfOpen: true }),
   ) {
     super(options.logger, net.createServer(), options.muxListenPort);
     this.muxServer.on("connection", (socket: net.Socket) => {
@@ -253,12 +260,13 @@ export class TunnelServer extends AbstractTunnel<
       this.updateHook();
     });
     proxyServer.on("connection", (socket: net.Socket) => {
-      if (!this.h2session) {
+      this.log({ proxyServer: "connection" });
+      if (!this.h2session || this.h2session.destroyed) {
         socket.resetAndDestroy();
       } else {
         this.addDemuxSocket(
           socket,
-          this.h2session!.request({
+          this.h2session.request({
             [http2.constants.HTTP2_HEADER_METHOD]: "POST",
           }),
         );
@@ -368,6 +376,7 @@ export class TunnelClient extends AbstractTunnel<
           net.createConnection({
             host: "127.0.0.1",
             port: this.options.localHttpPort,
+            allowHalfOpen: true,
           }),
           stream,
         );

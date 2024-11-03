@@ -7,7 +7,6 @@ import {
 } from "./h2tunnel.js";
 import net from "node:net";
 import * as http2 from "node:http2";
-import { strictEqual } from "node:assert";
 
 // localhost HTTP1 server "python3 -m http.server"
 const LOCAL_PORT = 14000;
@@ -19,6 +18,7 @@ const PROXY_PORT = 14004;
 const PROXY_TEST_PORT = 14007;
 // remote TLS server for establishing a tunnel
 const TUNNEL_PORT = 14005;
+const TUNNEL_TEST_PORT = 14008;
 // remote HTTPS server that is piped through the tunnel to localhost
 const MUX_PORT = 14006;
 
@@ -73,7 +73,7 @@ const clientOptions: ClientOptions = {
   tunnelRestartTimeout: 500 * TIME_MULTIPLIER,
 };
 
-type Conn = { clientSocket: net.Socket; originSocket: net.Socket };
+type Conn = { browserSocket: net.Socket; localhostSocket: net.Socket };
 
 async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms * TIME_MULTIPLIER));
@@ -120,9 +120,9 @@ class NetworkEmulator {
   incomingSocket: net.Socket | null = null;
   outgoingSocket: net.Socket | null = null;
   constructor(
-    readonly originPort: number,
-    readonly proxyPort: number,
-    readonly server = net.createServer(),
+    readonly forwardPort: number,
+    readonly listenPort: number,
+    readonly server = net.createServer({ allowHalfOpen: true }),
     readonly logger = getLogger("network", 31),
     readonly abortController = new AbortController(),
   ) {}
@@ -133,7 +133,8 @@ class NetworkEmulator {
         this.incomingSocket = incomingSocket;
         const outgoingSocket = net.createConnection({
           host: "127.0.0.1",
-          port: this.originPort,
+          port: this.forwardPort,
+          allowHalfOpen: true,
         });
         this.outgoingSocket = outgoingSocket;
         outgoingSocket.on("error", () => incomingSocket.resetAndDestroy());
@@ -143,7 +144,7 @@ class NetworkEmulator {
         outgoingSocket.pipe(incomingSocket);
       });
       this.server.on("listening", () => resolve());
-      this.server.listen(this.proxyPort, "127.0.0.1");
+      this.server.listen(this.listenPort, "127.0.0.1");
     });
   }
   async stopAndWaitUntilClosed() {
@@ -159,37 +160,41 @@ class EchoServer {
   constructor(
     readonly port: number,
     public proxyPort = port,
-    readonly logger = getLogger("localhost", 35),
+    readonly loggerLocalhost = getLogger("localhost", 35),
+    readonly loggerBrowser = getLogger("browser", 36),
   ) {
-    const server = net.createServer();
+    const server = net.createServer({ allowHalfOpen: true });
     server.on("connection", (socket) => {
-      logger({ echoServer: "connection" });
+      loggerLocalhost({ localhost: "connection" });
       socket.on("error", (err) => {
-        logger({ echoServer: "error", err });
+        loggerLocalhost({ localhost: "error", err });
       });
       socket.on("data", (data) => {
-        this.logger({
+        this.loggerLocalhost({
           echoServerData: data.toString(),
           socketWritableEnded: socket.writableEnded,
         });
-        // Add to data received
-        const previousData = this.dataReceived.get(socket) ?? "";
-        this.dataReceived.set(socket, previousData + data.toString("utf-8"));
-
+        this.appendData(socket, data);
         if (!socket.writableEnded) {
           socket.write(data);
         }
+      });
+      // Make sure other end stays half-open long enough to receive the last byte
+      socket.on("end", async () => {
+        loggerLocalhost({ localhost: "received FIN" });
+        await sleep(50);
+        loggerLocalhost({ localhost: "sending last byte and FIN" });
+        socket.end("z");
       });
     });
 
     this.server = server;
   }
 
-  // reset(proxyPort: number) {
-  //   this.proxyPort = proxyPort;
-  //   this.dataReceived.clear();
-  //   this.i = 0;
-  // }
+  appendData(socket: net.Socket, data: Buffer): void {
+    const previousData = this.dataReceived.get(socket) ?? "";
+    this.dataReceived.set(socket, previousData + data.toString("utf-8"));
+  }
 
   getSocketByPrefix(prefix: string): net.Socket {
     for (const [socket, data] of this.dataReceived) {
@@ -204,7 +209,7 @@ class EchoServer {
     this.server.listen(this.port);
     await new Promise<void>((resolve) =>
       this.server.on("listening", () => {
-        this.logger({ echoServer: "listening" });
+        this.loggerLocalhost({ localhost: "listening" });
         resolve();
       }),
     );
@@ -215,14 +220,34 @@ class EchoServer {
   }
 
   createClientSocket(): net.Socket {
-    return net.createConnection(this.proxyPort);
+    this.loggerBrowser({ browser: "connecting" });
+    const socket = net.createConnection({
+      port: this.proxyPort,
+      allowHalfOpen: true,
+    });
+    socket.on("data", (chunk) => {
+      this.appendData(socket, chunk);
+    });
+    // Make sure other end stays half-open long enough to receive the last byte
+    socket.on("end", async () => {
+      this.loggerBrowser({ browser: "received FIN" });
+      await sleep(50);
+      this.loggerBrowser({ browser: "sending last byte and FIN" });
+      socket.end("z");
+    });
+    return socket;
   }
 
   async expectEconn() {
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       const socket = net.createConnection(this.proxyPort);
-      socket.on("error", () => {
-        resolve();
+      socket.on("error", () => {});
+      socket.on("close", (hadError) => {
+        if (hadError) {
+          resolve();
+        } else {
+          reject();
+        }
       });
     });
   }
@@ -230,199 +255,192 @@ class EchoServer {
   async expectPingPongAndClose(t: TestContext) {
     const conn = await this.createConn(t);
     await new Promise<void>((resolve) => {
-      conn.originSocket.once("data", (pong) => {
+      conn.localhostSocket.once("data", (pong) => {
         t.assert.strictEqual(pong.toString(), "a");
-        // TODO: Test graceful destruction
-        conn.clientSocket.resetAndDestroy();
-        conn.originSocket.resetAndDestroy();
-        resolve();
+        // Send FIN from client and wait for FIN back
+        conn.browserSocket.end();
+        conn.browserSocket.on("close", () => resolve());
       });
       // ping
       const ping = "a";
-      conn.clientSocket.write(ping);
+      conn.browserSocket.write(ping);
     });
   }
 
   async createConn(t: TestContext): Promise<Conn> {
-    const clientSocket = this.createClientSocket();
+    const browserSocket = this.createClientSocket();
     const id = (this.i++).toString();
-    new Promise<void>((resolve) => clientSocket.on("connect", resolve));
+    new Promise<void>((resolve) => browserSocket.on("connect", resolve));
     // Expect id back
     await new Promise<void>((resolve) => {
-      clientSocket.once("data", (chunk) => {
+      browserSocket.once("data", (chunk) => {
         t.assert.strictEqual(chunk.toString(), id);
         resolve();
       });
-      clientSocket.write(id);
+      browserSocket.write(id);
     });
     await sleep(100);
-    const originSocket = this.getSocketByPrefix(id);
-    return { clientSocket, originSocket };
+    const localhostSocket = this.getSocketByPrefix(id);
+    return { browserSocket, localhostSocket };
   }
-}
 
-async function testConn(
-  t: TestContext,
-  server: EchoServer,
-  numBytes: number,
-  term: "FIN" | "RST",
-  by: "client" | "server",
-  delay: number = 0,
-  strict = true,
-) {
-  await sleep(delay);
-  const conn = await server.createConn(t);
-  await t.test(
-    `ping pong ${numBytes} byte(s)`,
-    { plan: numBytes },
-    async (t: TestContext) => {
-      for (let i = 0; i < numBytes; i++) {
-        await new Promise<void>((resolve) => {
-          conn.originSocket.once("data", (pong) => {
-            t.assert.strictEqual(pong.toString(), "a");
+  async testConn(
+    t: TestContext,
+    numBytes: number,
+    term: "FIN" | "RST",
+    by: "browser" | "localhost",
+    delay: number = 0,
+  ) {
+    await sleep(delay);
+    const conn = await this.createConn(t);
+    for (let i = 0; i < numBytes; i++) {
+      await new Promise<void>((resolve) => {
+        conn.localhostSocket.once("data", (pong) => {
+          t.assert.strictEqual(pong.toString(), "a");
+          resolve();
+        });
+        conn.browserSocket.write("a");
+      });
+      await sleep(50);
+    }
+
+    const [socket1, socket2] =
+      by === "browser"
+        ? [conn.browserSocket, conn.localhostSocket]
+        : [conn.localhostSocket, conn.browserSocket];
+
+    if (term === "FIN") {
+      t.assert.strictEqual(socket2.readyState, "open");
+      t.assert.strictEqual(socket1.readyState, "open");
+      socket1.end();
+      // socket1 sent FIN, but socket2 didn't receive it yet
+      t.assert.strictEqual(socket2.readyState, "open");
+      t.assert.strictEqual(socket1.readyState, "readOnly");
+      await Promise.all([
+        new Promise<void>((resolve) => {
+          socket2.on("end", () => {
+            // socket1 sent FIN and socket2 received it
+            t.assert.strictEqual(socket2.readyState, "writeOnly");
+            t.assert.strictEqual(socket1.readyState, "readOnly");
             resolve();
           });
-          // ping
-          const ping = "a";
-          conn.clientSocket.write(ping);
-        });
-        await sleep(50);
-      }
-    },
-  );
-
-  const [socket1, socket2] =
-    by === "client"
-      ? [conn.clientSocket, conn.originSocket]
-      : [conn.originSocket, conn.clientSocket];
-
-  if (term === "FIN") {
-    await t.test(
-      `clean termination by ${by} FIN`,
-      { plan: 12, timeout: 1000 },
-      (t: TestContext) =>
-        new Promise<void>((resolve, reject) => {
-          let i = 0;
-          const done = () => i === 2 && resolve();
-          t.assert.strictEqual(socket2.readyState, "open");
-          t.assert.strictEqual(socket1.readyState, "open");
-          socket2.on("end", () => {
-            // Server sent FIN and client received it
-            t.assert.strictEqual(socket2.readyState, "writeOnly");
-            t.assert.strictEqual(
-              socket1.readyState,
-              strict ? "readOnly" : "closed",
-            );
-          });
+        }),
+        new Promise<void>((resolve) => {
           socket2.on("close", (hasError) => {
             t.assert.strictEqual(hasError, false);
             t.assert.strictEqual(socket2.errored, null);
             t.assert.strictEqual(socket2.readyState, "closed");
-            i++;
-            done();
+            resolve();
           });
+        }),
+        new Promise<void>((resolve) => {
           socket1.on("close", (hasError) => {
             t.assert.strictEqual(hasError, false);
             t.assert.strictEqual(socket1.errored, null);
             t.assert.strictEqual(socket1.readyState, "closed");
-            i++;
-            done();
+            resolve();
           });
-          socket1.end();
-          // Server sent FIN, but client didn't receive it yet
-          t.assert.strictEqual(socket2.readyState, "open");
-          t.assert.strictEqual(socket1.readyState, "readOnly");
         }),
-    );
-  } else if (term == "RST") {
-    await t.test(
-      `clean reset by ${by} RST`,
-      { plan: 8, timeout: 1000 },
-      (t: TestContext) =>
+      ]);
+      const socket1data = this.dataReceived.get(socket1);
+      const socket2data = this.dataReceived.get(socket2);
+      // Make sure last byte was successfully communicated in half-open state
+      t.assert.strictEqual(socket1data, socket2data + "z");
+    } else if (term == "RST") {
+      socket1.resetAndDestroy();
+      t.assert.strictEqual(socket1.readyState, "closed");
+      t.assert.strictEqual(socket2.readyState, "open");
+      await Promise.all([
         new Promise<void>((resolve) => {
-          let i = 0;
-          const done = () => i === 2 && resolve();
           socket2.on("error", (err) => {
             t.assert.strictEqual(err["code"], "ECONNRESET");
             t.assert.strictEqual(socket2.readyState, "closed");
             t.assert.strictEqual(socket2.destroyed, true);
-            i++;
-            done();
+            resolve();
           });
+        }),
+        new Promise<void>((resolve) => {
           socket1.on("close", (hasError) => {
             // No error on our end because we initiated the RST
             t.assert.strictEqual(hasError, false);
             t.assert.strictEqual(socket1.readyState, "closed");
             t.assert.strictEqual(socket1.destroyed, true);
-            i++;
-            done();
+            resolve();
           });
-          socket1.resetAndDestroy();
-          t.assert.strictEqual(socket1.readyState, "closed");
-          t.assert.strictEqual(socket2.readyState, "open");
         }),
-    );
+      ]);
+    }
   }
 }
 
-await test.only("basic connection and termination", async (t) => {
-  const net = new NetworkEmulator(LOCAL_PORT, PROXY_TEST_PORT);
-  const server = new TunnelServer(serverOptions);
-  const client = new TunnelClient(clientOptions);
-  server.start();
-  client.start();
-  await server.waitUntilListening();
-  await client.waitUntilConnected();
-  await server.waitUntilConnected();
-  console.log(0, client.state);
-  await net.startAndWaitUntilReady();
-  for (const term of ["FIN", "RST"] satisfies ("FIN" | "RST")[]) {
-    for (const by of ["client", "server"] satisfies ("client" | "server")[]) {
-      for (const proxyPort of [LOCAL_PORT, PROXY_TEST_PORT, PROXY_PORT]) {
-        await t.test(
-          `clean termination by ${by} ${term} on ${proxyPort}`,
-          async (t) => {
-            const echoServer = new EchoServer(LOCAL_PORT, proxyPort);
-            await echoServer.startAndWaitUntilReady();
-            const strict = proxyPort !== PROXY_PORT;
-            // Test single
-            await testConn(t, echoServer, 1, term, by, 0, strict);
-            await testConn(t, echoServer, 4, term, by, 0, strict);
-            // Test double simultaneous
-            await Promise.all([
-              testConn(t, echoServer, 3, term, by, 0, strict),
-              testConn(t, echoServer, 3, term, by, 0, strict),
-            ]);
-            // Test triple delayed
-            await Promise.all([
-              testConn(t, echoServer, 4, term, by, 0, strict),
-              testConn(t, echoServer, 4, term, by, 10, strict),
-              testConn(t, echoServer, 4, term, by, 100, strict),
-            ]);
-            await echoServer.stopAndWaitUntilClosed();
-          },
-        );
+await test.only(
+  "basic connection and termination",
+  { timeout: 10000 },
+  async (t) => {
+    const net = new NetworkEmulator(LOCAL_PORT, PROXY_TEST_PORT);
+    const server = new TunnelServer(serverOptions);
+    const client = new TunnelClient(clientOptions);
+    server.start();
+    client.start();
+    await server.waitUntilListening();
+    await client.waitUntilConnected();
+    await server.waitUntilConnected();
+    await net.startAndWaitUntilReady();
+    for (const term of ["FIN", "RST"] satisfies ("FIN" | "RST")[]) {
+      for (const by of ["browser", "localhost"] satisfies (
+        | "browser"
+        | "localhost"
+      )[]) {
+        for (const proxyPort of [LOCAL_PORT, PROXY_TEST_PORT, PROXY_PORT]) {
+          // if (term !== "RST" || by !== "browser" || proxyPort !== PROXY_PORT) {
+          //   continue;
+          // }
+          // clean termination by browser RST on 14004
+          console.log(`clean termination by ${by} ${term} on ${proxyPort}`);
+          const echoServer = new EchoServer(LOCAL_PORT, proxyPort);
+          await echoServer.startAndWaitUntilReady();
+          // Test single
+          await echoServer.testConn(t, 1, term, by, 0);
+          await echoServer.testConn(t, 4, term, by, 0);
+          // Test double simultaneous
+          await Promise.all([
+            echoServer.testConn(t, 3, term, by, 0),
+            echoServer.testConn(t, 3, term, by, 0),
+          ]);
+          // Test triple delayed
+          await Promise.all([
+            echoServer.testConn(t, 4, term, by, 0),
+            echoServer.testConn(t, 4, term, by, 10),
+            echoServer.testConn(t, 4, term, by, 100),
+          ]);
+          await echoServer.stopAndWaitUntilClosed();
+        }
       }
     }
-  }
 
-  await net.stopAndWaitUntilClosed();
-  await client.stop();
-  await server.stop();
-});
+    await net.stopAndWaitUntilClosed();
+    await client.stop();
+    await server.stop();
+  },
+);
 
-await test("happy-path", async (t) => {
+await test("happy-path", { timeout: 5000 }, async (t) => {
   const echo = new EchoServer(LOCAL_PORT, PROXY_PORT);
   await echo.startAndWaitUntilReady();
 
   const server = new TunnelServer(serverOptions);
-  const client = new TunnelClient(clientOptions);
+  const client = new TunnelClient({
+    ...clientOptions,
+    tunnelPort: TUNNEL_TEST_PORT,
+  });
   server.start();
 
   // Make a request too early
   await echo.expectEconn();
 
   await server.waitUntilListening();
+  const net = new NetworkEmulator(TUNNEL_PORT, TUNNEL_TEST_PORT);
+  await net.startAndWaitUntilReady();
   client.start();
 
   // Make a request too early
@@ -457,7 +475,8 @@ await test("happy-path", async (t) => {
   await echo.expectPingPongAndClose(t);
 
   // Break tunnel while no requests are taking place
-  client.tunnelSocket!.destroy();
+  net.incomingSocket!.resetAndDestroy();
+  net.outgoingSocket!.resetAndDestroy();
   await sleep(10);
   await echo.expectEconn();
 
@@ -468,17 +487,18 @@ await test("happy-path", async (t) => {
   // Break tunnel during a request but before response headers could be sent
   const promise1 = echo.expectEconn();
   await sleep(10);
-  client.tunnelSocket!.destroy();
-  server.tunnelSocket!.destroy();
+  net.incomingSocket!.resetAndDestroy();
+  net.outgoingSocket!.resetAndDestroy();
   await sleep(10);
   await promise1;
 
   await client.stop();
   await server.stop();
   await echo.stopAndWaitUntilClosed();
+  await net.stopAndWaitUntilClosed();
 });
 
-await test("garbage-to-client", async (t: TestContext) => {
+await test("garbage-to-client", { timeout: 5000 }, async (t: TestContext) => {
   const echoServer = new EchoServer(LOCAL_PORT, PROXY_PORT);
   await echoServer.startAndWaitUntilReady();
   const stopBadServer = await createBadTlsServer(TUNNEL_PORT);
@@ -503,7 +523,7 @@ await test("garbage-to-client", async (t: TestContext) => {
   await echoServer.stopAndWaitUntilClosed();
 });
 
-await test("garbage-to-server", async (t: TestContext) => {
+await test("garbage-to-server", { timeout: 5000 }, async (t: TestContext) => {
   const echoServer = new EchoServer(LOCAL_PORT, PROXY_PORT);
   await echoServer.startAndWaitUntilReady();
   const server = new TunnelServer(serverOptions);
