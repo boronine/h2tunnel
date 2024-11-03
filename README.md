@@ -1,7 +1,7 @@
 # h2tunnel
 
-![NPM Version](https://img.shields.io/npm/v/h2tunnel)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/boronine/h2tunnel/node.js.yml)
+[![NPM Version](https://img.shields.io/npm/v/h2tunnel)](https://www.npmjs.com/package/h2tunnel)
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/boronine/h2tunnel/node.js.yml)](https://github.com/boronine/h2tunnel/actions/workflows/node.js.yml)
 
 A CLI tool and Node.js library for a popular "tunneling" workflow, similar to the proprietary [ngrok](https://ngrok.com/)
 or the openssh-based `ssh -L` solution. All in [less than 500 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)

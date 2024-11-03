@@ -86,12 +86,6 @@ export abstract class AbstractTunnel<
 
   linkSocketsIfNecessary() {
     if (this.tunnelSocket && !this.tunnelSocket.closed && this.muxSocket) {
-      this.tunnelSocket.on("data", (data) =>
-        this.log({ tunnelSocketBytes: data.length }),
-      );
-      this.muxSocket.on("data", (data) =>
-        this.log({ muxSocketBytes: data.length }),
-      );
       this.tunnelSocket.pipe(this.muxSocket);
       this.muxSocket.pipe(this.tunnelSocket);
       this.log({ linked: true });
@@ -147,39 +141,47 @@ export abstract class AbstractTunnel<
 
   addDemuxSocket(socket: net.Socket, stream: http2.Http2Stream): void {
     this.log({ demuxSocket: "added", streamId: stream.id });
-    socket.on("data", (chunk) => stream.write(chunk));
-    stream.on("data", (chunk) => socket.write(chunk));
-    socket.on("error", (err) => {
-      this.log({ demuxSocket: "error", err });
-      if (!stream.closed) {
-        stream.close(http2.constants.NGHTTP2_CANCEL);
+    socket.on("data", (chunk) => {
+      this.log({ streamDataWrite: chunk.length, streamId: stream.id });
+      stream.write(chunk);
+    });
+    stream.on("data", (chunk) => {
+      this.log({ streamDataRead: chunk.length, streamId: stream.id });
+      socket.write(chunk);
+    });
+    // Prevent error being logged, we are handling it during the "close" event
+    socket.on("error", () => {});
+    socket.on("close", () => {
+      this.log({
+        demuxSocket: "close",
+        streamId: stream.id,
+        streamError: stream.errored,
+        socketError: socket.errored,
+      });
+      if (!stream.destroyed) {
+        if (socket.errored) {
+          stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR);
+        } else {
+          stream.destroy();
+        }
       }
     });
-    socket.on("end", () => {
-      this.log({ demuxSocket: "end" });
-      stream.end();
-    });
-    stream.on("aborted", () => {
-      this.log({ demuxStream: "aborted" });
-    });
-    stream.on("error", (err) => {
-      this.log({ demuxStream: "error", err });
-    });
-    stream.on("end", () => {
-      this.log({ demuxStream: "end" });
-      // This is a hack to workaround Node.js behavior where "end"/"close" event is emitted before "aborted"/"error"
-      setTimeout(() => {
-        if (stream.aborted) {
-          this.log({
-            demuxStream: "actually-aborted",
-            socketAlreadyDestroyed: socket.destroyed,
-          });
+    // Prevent error being logged, we are handling it during the "close" event
+    stream.on("error", () => {});
+    stream.on("close", () => {
+      this.log({
+        demuxStream: "close",
+        streamId: stream.id,
+        streamError: stream.errored,
+        socketError: socket.errored,
+      });
+      if (!socket.destroyed) {
+        if (stream.errored) {
           socket.resetAndDestroy();
         } else {
-          this.log({ demuxStream: "actually-ended" });
-          socket.end();
+          socket.destroy();
         }
-      }, 1);
+      }
     });
   }
 

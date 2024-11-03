@@ -6,6 +6,8 @@ import {
   TunnelServer,
 } from "./h2tunnel.js";
 import net from "node:net";
+import * as http2 from "node:http2";
+import { strictEqual } from "node:assert";
 
 // localhost HTTP1 server "python3 -m http.server"
 const LOCAL_PORT = 14000;
@@ -19,6 +21,9 @@ const PROXY_TEST_PORT = 14007;
 const TUNNEL_PORT = 14005;
 // remote HTTPS server that is piped through the tunnel to localhost
 const MUX_PORT = 14006;
+
+// Reduce this to make tests faster
+const TIME_MULTIPLIER = 0.1;
 
 const CLIENT_KEY = `-----BEGIN PRIVATE KEY-----
 MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDCDzcLnOqzvCrnUyd4P
@@ -65,13 +70,13 @@ const clientOptions: ClientOptions = {
   cert: CLIENT_CRT,
   localHttpPort: LOCAL_PORT,
   demuxListenPort: DEMUX_PORT,
-  tunnelRestartTimeout: 500,
+  tunnelRestartTimeout: 500 * TIME_MULTIPLIER,
 };
 
 type Conn = { clientSocket: net.Socket; originSocket: net.Socket };
 
 async function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms * TIME_MULTIPLIER));
 }
 
 async function createBadTlsServer(port: number): Promise<() => Promise<void>> {
@@ -294,9 +299,9 @@ async function testConn(
   if (term === "FIN") {
     await t.test(
       `clean termination by ${by} FIN`,
-      { plan: 12 },
+      { plan: 12, timeout: 1000 },
       (t: TestContext) =>
-        new Promise<void>((resolve) => {
+        new Promise<void>((resolve, reject) => {
           let i = 0;
           const done = () => i === 2 && resolve();
           t.assert.strictEqual(socket2.readyState, "open");
@@ -332,7 +337,7 @@ async function testConn(
   } else if (term == "RST") {
     await t.test(
       `clean reset by ${by} RST`,
-      { plan: 8 },
+      { plan: 8, timeout: 1000 },
       (t: TestContext) =>
         new Promise<void>((resolve) => {
           let i = 0;
@@ -360,7 +365,7 @@ async function testConn(
   }
 }
 
-await test("basic connection and termination", async (t) => {
+await test.only("basic connection and termination", async (t) => {
   const net = new NetworkEmulator(LOCAL_PORT, PROXY_TEST_PORT);
   const server = new TunnelServer(serverOptions);
   const client = new TunnelClient(clientOptions);
@@ -368,29 +373,35 @@ await test("basic connection and termination", async (t) => {
   client.start();
   await server.waitUntilListening();
   await client.waitUntilConnected();
+  await server.waitUntilConnected();
+  console.log(0, client.state);
   await net.startAndWaitUntilReady();
   for (const term of ["FIN", "RST"] satisfies ("FIN" | "RST")[]) {
     for (const by of ["client", "server"] satisfies ("client" | "server")[]) {
-      for (const numBytes of [1, 4]) {
-        for (const proxyPort of [LOCAL_PORT, PROXY_TEST_PORT, PROXY_PORT]) {
-          const echoServer = new EchoServer(LOCAL_PORT, proxyPort);
-          await echoServer.startAndWaitUntilReady();
-          const strict = proxyPort !== PROXY_PORT;
-          // Test single
-          await testConn(t, echoServer, numBytes, term, by, 0, strict);
-          // Test double simultaneous
-          await Promise.all([
-            testConn(t, echoServer, numBytes, term, by, 0, strict),
-            testConn(t, echoServer, numBytes, term, by, 0, strict),
-          ]);
-          // Test triple delayed
-          await Promise.all([
-            testConn(t, echoServer, numBytes, term, by, 0, strict),
-            testConn(t, echoServer, numBytes, term, by, 10, strict),
-            testConn(t, echoServer, numBytes, term, by, 100, strict),
-          ]);
-          await echoServer.stopAndWaitUntilClosed();
-        }
+      for (const proxyPort of [LOCAL_PORT, PROXY_TEST_PORT, PROXY_PORT]) {
+        await t.test(
+          `clean termination by ${by} ${term} on ${proxyPort}`,
+          async (t) => {
+            const echoServer = new EchoServer(LOCAL_PORT, proxyPort);
+            await echoServer.startAndWaitUntilReady();
+            const strict = proxyPort !== PROXY_PORT;
+            // Test single
+            await testConn(t, echoServer, 1, term, by, 0, strict);
+            await testConn(t, echoServer, 4, term, by, 0, strict);
+            // Test double simultaneous
+            await Promise.all([
+              testConn(t, echoServer, 3, term, by, 0, strict),
+              testConn(t, echoServer, 3, term, by, 0, strict),
+            ]);
+            // Test triple delayed
+            await Promise.all([
+              testConn(t, echoServer, 4, term, by, 0, strict),
+              testConn(t, echoServer, 4, term, by, 10, strict),
+              testConn(t, echoServer, 4, term, by, 100, strict),
+            ]);
+            await echoServer.stopAndWaitUntilClosed();
+          },
+        );
       }
     }
   }
@@ -400,7 +411,7 @@ await test("basic connection and termination", async (t) => {
   await server.stop();
 });
 
-await test.only("happy-path", async (t) => {
+await test("happy-path", async (t) => {
   const echo = new EchoServer(LOCAL_PORT, PROXY_PORT);
   await echo.startAndWaitUntilReady();
 
