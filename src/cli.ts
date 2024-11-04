@@ -82,7 +82,7 @@ client options:
   --${"key" satisfies Param} <path>                 Path to private key file (.key)
   --${"tunnel-host" satisfies Param} <host>         Host for the tunnel server
   --${"tunnel-port" satisfies Param} <port>         Port for the tunnel server
-  --${"origin-host" satisfies Param} <port>         Host for the local TCP server (default: ${DEFAULT_ORIGIN_HOST})
+  --${"origin-host" satisfies Param} <host>         Host for the local TCP server (default: ${DEFAULT_ORIGIN_HOST})
   --${"origin-port" satisfies Param} <port>         Port for the local TCP server
 
 server options:
@@ -90,7 +90,7 @@ server options:
   --${"key" satisfies Param} <path>                 Path to private key file (.key)
   --${"tunnel-listen-ip" satisfies Param} <ip>      IP for the tunnel server to bind on (default: ${DEFAULT_LISTEN_IP})
   --${"tunnel-listen-port" satisfies Param} <port>  Port for the tunnel server to listen on
-  --${"proxy-listen-ip" satisfies Param} <port>     IP for the remote TCP proxy server to bind on (default: ${DEFAULT_LISTEN_IP})
+  --${"proxy-listen-ip" satisfies Param} <ip>       IP for the remote TCP proxy server to bind on (default: ${DEFAULT_LISTEN_IP})
   --${"proxy-listen-port" satisfies Param} <port>   Port for the remote TCP proxy server to listen on
   
 The tunnel and proxy servers will bind to 0.0.0.0 by default which will make them publically available. This requires

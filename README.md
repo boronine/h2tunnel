@@ -9,7 +9,7 @@ or the [`ssh -R` solution](https://www.ssh.com/academy/ssh/tunneling-example#rem
 The client (localhost) establishes a tunnel to the server (public IP), and the server forwards incoming connections to
 your local machine through this tunnel. In effect, your local server becomes publically available.
 
-All in [less than 500 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
+All this in [less than 500 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
 with no dependencies.
 
 ![Diagram](https://raw.githubusercontent.com/boronine/h2tunnel/main/diagram.drawio.svg)
@@ -19,18 +19,23 @@ with no dependencies.
 h2tunnel is unique among [its many alternatives](https://github.com/anderspitman/awesome-tunneling) for the way it
 leverages existing protocols:
 
-1. The client initiates a TLS connection to the server and starts listening for HTTP/2 sessions
-2. The server receives a TLS connection and initiates an HTTP/2 session through it
+1. The client initiates a TLS connection to the server and uses this socket to listen for HTTP/2 sessions
+2. The server receives this TLS connection and initiates a persistent HTTP/2 session through the socket back to the client
 3. The server takes incoming TCP connections, converts them into HTTP/2 streams, and forwards them to the client
-4. The client receives these HTTP/2 streams, converts them back into TCP connections for the local server
+4. The client receives these HTTP/2 streams, converts them back into TCP connections and forwards them to the local server
 
-The purpose of using HTTP/2 is to take advantage of its multiplexing capability. This feature of the protocol allows
-simultaneous requests to be processed on a single TCP connection (the "tunnel").
+We use [HTTP/2](https://en.wikipedia.org/wiki/HTTP/2) to take advantage of its built-in multiplexing feature. This
+allows simultaneous duplex streams to be processed on a single TCP connection (the "tunnel").
 
-For authentication we use a self-signed TLS certificate + private key pair. This pair is used by both the client and
-the server, and both are configured to reject anything else. The pair is effectively a shared password.
+For authentication we use a self-signed [TLS](https://en.wikipedia.org/wiki/Transport_Layer_Security) certificate +
+private key pair. This pair is used by both the client and the server, and both are configured to reject any other
+credential. The pair is effectively a shared password. TLS has a ["pre-shared key" mode](https://en.wikipedia.org/wiki/TLS-PSK)
+which would be more appropriate but Node.js documentation [warns against using it](https://github.com/boronine/h2tunnel/issues/5).
 
 ## Installation
+
+You can add the [h2tunnel npm package](https://www.npmjs.com/package/h2tunnel) to your `package.json` or install
+h2tunnel globally like so:
 
 ```bash
 npm install -g h2tunnel
@@ -50,7 +55,7 @@ client options:
   --key <path>                 Path to private key file (.key)
   --tunnel-host <host>         Host for the tunnel server
   --tunnel-port <port>         Port for the tunnel server
-  --origin-host <port>         Host for the local TCP server (default: localhost)
+  --origin-host <host>         Host for the local TCP server (default: localhost)
   --origin-port <port>         Port for the local TCP server
 
 server options:
@@ -58,7 +63,7 @@ server options:
   --key <path>                 Path to private key file (.key)
   --tunnel-listen-ip <ip>      IP for the tunnel server to bind on (default: 0.0.0.0)
   --tunnel-listen-port <port>  Port for the tunnel server to listen on
-  --proxy-listen-ip <port>     IP for the remote TCP proxy server to bind on (default: 0.0.0.0)
+  --proxy-listen-ip <ip>       IP for the remote TCP proxy server to bind on (default: 0.0.0.0)
   --proxy-listen-port <port>   Port for the remote TCP proxy server to listen on
 
 The tunnel and proxy servers will bind to 0.0.0.0 by default which will make them publically available. This requires
@@ -74,8 +79,8 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -no
 
 ### Forward localhost:8000 to http://mysite.example.com
 
-On your server (example.com), we will be listening for tunnel connections on port 15001, and providing an HTTP proxy
-on port 80. Make sure these are open in your firewall.
+On your server (mysite.example.com), we will be listening for tunnel connections on port 15001, and providing an HTTP
+proxy on port 80. Make sure these are open in your firewall.
 
 ```bash
 # sudo is required to bind to 0.0.0.0, which is necessary for public access
@@ -94,9 +99,12 @@ h2tunnel client \
   --key h2tunnel.key \
   --tunnel-host=mysite.example.com \
   --tunnel-port=15001 \
-  --local-http-port=8000
+  --origin-port=8000
+```
 
-# If you have python3 installed, you can test using this built-in HTTP server
+If you have python3 installed, you can test using this built-in HTTP server:
+
+```bash
 python3 -m http.server
 ```
 
@@ -115,7 +123,7 @@ TUNNEL_DOMAIN=mysite.example.com
 Push the necessary files to the server:
 
 ```bash
-scp .env Caddyfile Dockerfile docker-compose.yml h2tunnel.crt h2tunnel.key mysite.example.com:/home/myuser
+scp .env Caddyfile Dockerfile docker-compose.yml h2tunnel.crt h2tunnel.key myuser@mysite.example.com:/home/myuser
 ```
 
 Start the server:
@@ -184,33 +192,13 @@ await server.stop();
 
 ```bash
 npm run test
-npm run coverage
+npm run coverage # See build/index.html
 ```
 
-## Changelog
+## CHANGELOG
 
-### 0.3.0
+See [CHANGELOG.md](./CHANGELOG.md) file for full text.
 
-- Support tunneling half-closed TCP connections, these are sometimes killed by middleboxes but they will be safe in h2tunnel
-- Remove mux/demux port configuration, instead take a random port assigned by the OS
-- Allow specifying the origin host for advanced use cases, default is localhost
-
-### 0.2.0
-
-- Tunnel TCP instead of HTTP1, supporting a wide range of protocols
-- Prevent double TLS encryption by using Node.js unencrypted HTTP/2 connection
-- Lots of testing improvements
-- Reduce code size to <500 LOC
-
-### 0.1.1
-
-- Improved testing and reconnection logic
-
-### 0.1.0
-
-- Proof of concept
-- Supports tunneling HTTP1 over HTTP/2 + TLS
-
-## License
+## LICENSE
 
 See [LICENSE](./LICENSE) file for full text.
