@@ -18,7 +18,5 @@
     "outDir": "build",
     "strictNullChecks": true
   },
-  "include": [
-    "src/*"
-  ]
+  "include": ["src/*"]
 }

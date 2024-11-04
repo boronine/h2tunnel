@@ -1,13 +1,25 @@
 {
   "name": "h2tunnel",
-  "description": "localhost tunnel using HTTP2 multiplexing",
+  "description": "Zero-dependency remote port forwarding (TCP over HTTP/2)",
   "version": "0.2.0",
   "type": "module",
   "license": "MIT",
+  "homepage": "https://github.com/boronine/h2tunnel#readme",
+  "keywords": [
+    "tls",
+    "http2",
+    "tunnel",
+    "localhost",
+    "multiplexing",
+    "ngrok"
+  ],
   "author": {
     "name": "Alexei Boronine",
     "email": "alexei@boronine.com",
     "url": "https://www.boronine.com"
+  },
+  "bugs": {
+    "url": "https://github.com/boronine/h2tunnel/issues"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",
