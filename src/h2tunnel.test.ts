@@ -6,12 +6,9 @@ import {
   TunnelServer,
 } from "./h2tunnel.js";
 import net from "node:net";
-import * as http2 from "node:http2";
 
-// localhost HTTP1 server "python3 -m http.server"
+// localhost echo server
 const LOCAL_PORT = 14000;
-// localhost HTTP2 server that proxies to localhost HTTP1 server
-const DEMUX_PORT = 14003;
 
 // remote public HTTP1 server
 const PROXY_PORT = 14004;
@@ -19,8 +16,6 @@ const PROXY_TEST_PORT = 14007;
 // remote TLS server for establishing a tunnel
 const TUNNEL_PORT = 14005;
 const TUNNEL_TEST_PORT = 14008;
-// remote HTTPS server that is piped through the tunnel to localhost
-const MUX_PORT = 14006;
 
 // Reduce this to make tests faster
 const TIME_MULTIPLIER = 0.1;
@@ -53,23 +48,22 @@ const getLogger = (name: string, colorCode: number) => (line: object) =>
 
 const serverOptions: ServerOptions = {
   logger: getLogger("server", 32),
-  tunnelListenIp: "127.0.0.1",
-  tunnelListenPort: TUNNEL_PORT,
   key: CLIENT_KEY,
   cert: CLIENT_CRT,
-  proxyListenPort: PROXY_PORT,
+  tunnelListenIp: "127.0.0.1",
+  tunnelListenPort: TUNNEL_PORT,
   proxyListenIp: "127.0.0.1",
-  muxListenPort: MUX_PORT,
+  proxyListenPort: PROXY_PORT,
 };
 
 const clientOptions: ClientOptions = {
   logger: getLogger("client", 33),
-  tunnelHost: "localhost",
-  tunnelPort: TUNNEL_PORT,
   key: CLIENT_KEY,
   cert: CLIENT_CRT,
-  localHttpPort: LOCAL_PORT,
-  demuxListenPort: DEMUX_PORT,
+  tunnelHost: "localhost",
+  tunnelPort: TUNNEL_PORT,
+  originHost: "localhost",
+  originPort: LOCAL_PORT,
   tunnelRestartTimeout: 500 * TIME_MULTIPLIER,
 };
 

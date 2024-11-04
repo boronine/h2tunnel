@@ -30,57 +30,79 @@ the server, and both are configured to reject anything else. This way, the pair 
 
 ## Usage
 
+
+```
+usage: h2tunnel <command> [options]
+
+commands:
+  client
+  server
+ 
+client options:
+  --crt <path>                 Path to certificate file (.crt)
+  --key <path>                 Path to private key file (.key)
+  --tunnel-host <host>         Host for the tunnel server
+  --tunnel-port <port>         Port for the tunnel server
+  --origin-host <port>         Host for the local TCP server (default: localhost)
+  --origin-port <port>         Port for the local TCP server
+
+server options:
+  --crt <path>                 Path to certificate file (.crt)
+  --key <path>                 Path to private key file (.key)
+  --tunnel-listen-ip <ip>      IP for the tunnel server to bind on (default: 0.0.0.0)
+  --tunnel-listen-port <port>  Port for the tunnel server to listen on
+  --proxy-listen-ip <port>     IP for the remote TCP proxy server to bind on (default: 0.0.0.0)
+  --proxy-listen-port <port>   Port for the remote TCP proxy server to listen on
+  
+The tunnel and proxy servers will bind to 0.0.0.0 by default which will make them publically available. This requires
+superuser permissions on Linux. You can change this setting to bind to a specific network interface, e.g. a VPN, but
+this is advanced usage.
+```
+
 Generate `h2tunnel.key` and `h2tunnel.crt` files using `openssl` command:
 
 ```bash
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=localhost"
 ```
 
-### Forward localhost:8000 to http://example.com
+### Forward localhost:8000 to http://mysite.example.com
 
 On your server (example.com), we will be listening for tunnel connections on port 15001, and providing an HTTP proxy 
 on port 80. Make sure these are open in your firewall.
 
-Use any port for `--mux-listen-port`, h2tunnel will run an HTTP2 multiplexer on this port bound to 127.0.0.1,
-it will not be exposed to the internet even if your firewall allows it.
-
 ```bash
+# sudo is required to bind to 0.0.0.0, which makes the tunnel server and proxy server publically available
 sudo h2tunnel server \
   --crt h2tunnel.crt \
   --key h2tunnel.key \
-  --tunnel-listen-ip 0.0.0.0 \
   --tunnel-listen-port 15001 \
-  --proxy-listen-ip 0.0.0.0 \
-  --proxy-listen-port 80 \
-  --mux-listen-port=15002
+  --proxy-listen-port 80
 ````
 
 On your local machine, we will connect to the tunnel and forward a local HTTP server on port 8000. 
 
-Use any port for `--demux-listen-port`, h2tunnel will run an HTTP2 demultiplexer on it.
-
 ```bash
-python3 -m http.server # runs on port 8000
+python3 -m http.server # runs on port 8000 by default
 h2tunnel client \
   --crt h2tunnel.crt \
   --key h2tunnel.key \
-  --tunnel-host=example.com \
+  --tunnel-host=mysite.example.com \
   --tunnel-port=15001 \
-  --local-http-port=8000 \
-  --demux-listen-port=15004
+  --local-http-port=8000
 ```
 
-### Forward localhost:8000 to https://example.com
+### Forward localhost:8000 to https://mysite.example.com
 
 This is the same as the previous example, but with an extra layer: a [Caddy](https://caddyserver.com/) reverse proxy
-that will auto-provision TLS certificates for your domain. This is useful if you want to expose an HTTPS server.
+that will auto-provision TLS certificates for your domain. This is useful if you want to expose a local HTTP server 
+as HTTPS.
 
 The client command line is the same as before, but for the server we will use a docker compose setup.
 
 Specify your domain in the `.env` file:
 
 ```
-TUNNEL_DOMAIN=example.com
+TUNNEL_DOMAIN=mysite.example.com
 ```
 
 Push the necessary files to the server:
@@ -106,14 +128,17 @@ const client = new TunnelClient({
     logger: (line) => console.log(line), // optional
     key: `-----BEGIN PRIVATE KEY----- ...`,
     cert: `-----BEGIN CERTIFICATE----- ...`,
-    demuxListenPort: 15004,
-    localHttpPort: 8000,
+    originHost: "localhost", // optional
+    originPort: 8000,
     tunnelHost: `mysite.example.com`,
     tunnelPort: 15001,
 });
 
 // Start the client
 client.start();
+
+// Wait until client is connected
+await client.waitUntilConnected();
 
 // Stop the client
 await client.stop();
@@ -124,17 +149,22 @@ import {TunnelServer} from "h2tunnel";
 
 const server = new TunnelServer({
     logger: (line) => console.log(line), // optional
-    tunnelListenIp: "0.0.0.0",
-    tunnelListenPort: 15001,
     key: `-----BEGIN PRIVATE KEY----- ...`,
     cert: `-----BEGIN CERTIFICATE----- ...`,
+    tunnelListenIp: "0.0.0.0", // optional
+    tunnelListenPort: 15001,
+    proxyListenIp: "0.0.0.0", // optional
     proxyListenPort: 80,
-    proxyListenIp: "0.0.0.0",
-    muxListenPort: 15002,
 });
 
 // Start the server
 server.start();
+
+// Wait until server is listening
+await client.waitUntilListening();
+
+// Wait until server is connected
+await client.waitUntilConnected();
 
 // Stop the server
 await server.stop();

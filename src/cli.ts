@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { AbstractTunnel, TunnelClient, TunnelServer } from "./h2tunnel.js";
+import {
+  AbstractTunnel,
+  DEFAULT_LISTEN_IP,
+  DEFAULT_ORIGIN_HOST,
+  TunnelClient,
+  TunnelServer,
+} from "./h2tunnel.js";
 import * as fs from "node:fs";
 
 const { positionals, values } = parseArgs({
@@ -24,9 +30,6 @@ const { positionals, values } = parseArgs({
     "proxy-listen-port": {
       type: "string",
     },
-    "mux-listen-port": {
-      type: "string",
-    },
     // Client
     "tunnel-host": {
       type: "string",
@@ -34,10 +37,10 @@ const { positionals, values } = parseArgs({
     "tunnel-port": {
       type: "string",
     },
-    "local-http-port": {
+    "origin-host": {
       type: "string",
     },
-    "demux-listen-port": {
+    "origin-port": {
       type: "string",
     },
   },
@@ -79,17 +82,20 @@ client options:
   --${"key" satisfies Param} <path>                 Path to private key file (.key)
   --${"tunnel-host" satisfies Param} <host>         Host for the tunnel server
   --${"tunnel-port" satisfies Param} <port>         Port for the tunnel server
-  --${"local-http-port" satisfies Param} <port>     Port for the local HTTP server
-  --${"demux-listen-port" satisfies Param} <port>   Port for the HTTP2 server to listen on
+  --${"origin-host" satisfies Param} <port>         Host for the local TCP server (default: ${DEFAULT_ORIGIN_HOST})
+  --${"origin-port" satisfies Param} <port>         Port for the local TCP server
 
 server options:
   --${"crt" satisfies Param} <path>                 Path to certificate file (.crt)
   --${"key" satisfies Param} <path>                 Path to private key file (.key)
-  --${"tunnel-listen-ip" satisfies Param} <ip>      IP for the tunnel server to bind on (use 0.0.0.0 for all interfaces)
+  --${"tunnel-listen-ip" satisfies Param} <ip>      IP for the tunnel server to bind on (default: ${DEFAULT_LISTEN_IP})
   --${"tunnel-listen-port" satisfies Param} <port>  Port for the tunnel server to listen on
-  --${"proxy-listen-ip" satisfies Param} <port>     Host for the remote HTTP server (use 0.0.0.0 for all interfaces)
-  --${"proxy-listen-port" satisfies Param} <port>   Port for the remote HTTP server
-  --${"mux-listen-port" satisfies Param} <port>     Port for the HTTP2 server to listen on
+  --${"proxy-listen-ip" satisfies Param} <port>     IP for the remote TCP proxy server to bind on (default: ${DEFAULT_LISTEN_IP})
+  --${"proxy-listen-port" satisfies Param} <port>   Port for the remote TCP proxy server to listen on
+  
+The tunnel and proxy servers will bind to 0.0.0.0 by default which will make them publically available. This requires
+superuser permissions on Linux. You can change this setting to bind to a specific network interface, e.g. a VPN, but
+this is advanced usage.
 `;
 
 if (positionals.length === 0) {
@@ -99,22 +105,21 @@ if (positionals.length === 0) {
   let tunnel: AbstractTunnel<any, any>;
   if (command === "client") {
     tunnel = new TunnelClient({
-      tunnelHost: getString("tunnel-host"),
-      tunnelPort: getInt("tunnel-port"),
       key: fs.readFileSync(getString("key"), "utf8"),
       cert: fs.readFileSync(getString("crt"), "utf8"),
-      localHttpPort: getInt("local-http-port"),
-      demuxListenPort: getInt("demux-listen-port"),
+      tunnelHost: getString("tunnel-host"),
+      tunnelPort: getInt("tunnel-port"),
+      originHost: values["origin-host" satisfies Param],
+      originPort: getInt("origin-port"),
     });
   } else if (command === "server") {
     tunnel = new TunnelServer({
-      tunnelListenIp: getString("tunnel-listen-ip"),
-      tunnelListenPort: getInt("tunnel-listen-port"),
       key: fs.readFileSync(getString("key"), "utf8"),
       cert: fs.readFileSync(getString("crt"), "utf8"),
+      tunnelListenIp: values["tunnel-listen-ip" satisfies Param],
+      tunnelListenPort: getInt("tunnel-listen-port"),
+      proxyListenIp: values["proxy-listen-ip" satisfies Param],
       proxyListenPort: getInt("proxy-listen-port"),
-      proxyListenIp: getString("proxy-listen-ip"),
-      muxListenPort: getInt("mux-listen-port"),
     });
   } else {
     throw new Error(`Unknown command: ${command}`);
