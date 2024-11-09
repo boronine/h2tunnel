@@ -93,9 +93,9 @@ server options:
   --${"proxy-listen-ip" satisfies Param} <ip>       IP for the remote TCP proxy server to bind on (default: ${DEFAULT_LISTEN_IP})
   --${"proxy-listen-port" satisfies Param} <port>   Port for the remote TCP proxy server to listen on
   
-The tunnel and proxy servers will bind to 0.0.0.0 by default which will make them publically available. This requires
+The tunnel and proxy servers will bind to ::0 by default which will make them publically available. This requires
 superuser permissions on Linux. You can change this setting to bind to a specific network interface, e.g. a VPN, but
-this is advanced usage.
+this is advanced usage. Note that on most operating systems, binding to ::0 will also bind to 0.0.0.0.
 `;
 
 if (positionals.length === 0) {

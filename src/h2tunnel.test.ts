@@ -8,14 +8,17 @@ import {
 import net from "node:net";
 
 // localhost echo server
-const LOCAL_PORT = 14000;
+const LOCAL_PORT = 15000;
+// localhost echo server passed through network emulator
+const LOCAL2_PORT = 15007;
 
-// remote public HTTP1 server
-const PROXY_PORT = 14004;
-const PROXY_TEST_PORT = 14007;
+// remote public echo server forwarded by h2tunnel
+const PROXY_PORT = 15004;
+
 // remote TLS server for establishing a tunnel
-const TUNNEL_PORT = 14005;
-const TUNNEL_TEST_PORT = 14008;
+const TUNNEL_PORT = 15005;
+// remote TLS server for establishing a tunnel passed through network emulator
+const TUNNEL2_PORT = 15008;
 
 // Reduce this to make tests faster
 const TIME_MULTIPLIER = 0.1;
@@ -50,9 +53,9 @@ const serverOptions: ServerOptions = {
   logger: getLogger("server", 32),
   key: CLIENT_KEY,
   cert: CLIENT_CRT,
-  tunnelListenIp: "127.0.0.1",
+  tunnelListenIp: "::1",
   tunnelListenPort: TUNNEL_PORT,
-  proxyListenIp: "127.0.0.1",
+  proxyListenIp: "::1",
   proxyListenPort: PROXY_PORT,
 };
 
@@ -60,14 +63,14 @@ const clientOptions: ClientOptions = {
   logger: getLogger("client", 33),
   key: CLIENT_KEY,
   cert: CLIENT_CRT,
-  tunnelHost: "localhost",
+  tunnelHost: "::1",
   tunnelPort: TUNNEL_PORT,
-  originHost: "localhost",
+  originHost: "::1",
   originPort: LOCAL_PORT,
   tunnelRestartTimeout: 500 * TIME_MULTIPLIER,
 };
 
-type Conn = { browserSocket: net.Socket; localhostSocket: net.Socket };
+type Conn = { browserSocket: net.Socket; originSocket: net.Socket };
 
 async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms * TIME_MULTIPLIER));
@@ -110,12 +113,19 @@ async function createBadTlsClient(port: number): Promise<() => Promise<void>> {
     });
 }
 
+interface NetworkEmulatorParams {
+  listenHost: string;
+  listenPort: number;
+  forwardHost: string;
+  forwardPort: number;
+}
+
 class NetworkEmulator {
   incomingSocket: net.Socket | null = null;
   outgoingSocket: net.Socket | null = null;
+
   constructor(
-    readonly forwardPort: number,
-    readonly listenPort: number,
+    readonly params: NetworkEmulatorParams,
     readonly server = net.createServer({ allowHalfOpen: true }),
     readonly logger = getLogger("network", 31),
     readonly abortController = new AbortController(),
@@ -126,8 +136,8 @@ class NetworkEmulator {
       this.server.on("connection", (incomingSocket: net.Socket) => {
         this.incomingSocket = incomingSocket;
         const outgoingSocket = net.createConnection({
-          host: "127.0.0.1",
-          port: this.forwardPort,
+          host: this.params.forwardHost,
+          port: this.params.forwardPort,
           allowHalfOpen: true,
         });
         this.outgoingSocket = outgoingSocket;
@@ -138,7 +148,7 @@ class NetworkEmulator {
         outgoingSocket.pipe(incomingSocket);
       });
       this.server.on("listening", () => resolve());
-      this.server.listen(this.listenPort, "127.0.0.1");
+      this.server.listen(this.params.listenPort, this.params.listenHost);
     });
   }
   async stopAndWaitUntilClosed() {
@@ -147,24 +157,30 @@ class NetworkEmulator {
   }
 }
 
-class EchoServer {
-  readonly server: net.Server;
+interface EchoServerParams {
+  originListenHost: string;
+  originListenPort: number;
+  proxyHost: string;
+  proxyPort: number;
+}
+
+class EchoTester {
   readonly dataReceived: Map<net.Socket, string> = new Map();
   private i = 0;
+
   constructor(
-    readonly port: number,
-    public proxyPort = port,
-    readonly loggerLocalhost = getLogger("localhost", 35),
+    readonly params: EchoServerParams,
+    readonly loggerOrigin = getLogger("origin", 35),
     readonly loggerBrowser = getLogger("browser", 36),
+    readonly server = net.createServer({ allowHalfOpen: true }),
   ) {
-    const server = net.createServer({ allowHalfOpen: true });
-    server.on("connection", (socket) => {
-      loggerLocalhost({ localhost: "connection" });
+    this.server.on("connection", (socket) => {
+      loggerOrigin({ localhost: "connection" });
       socket.on("error", (err) => {
-        loggerLocalhost({ localhost: "error", err });
+        loggerOrigin({ localhost: "error", err });
       });
       socket.on("data", (data) => {
-        this.loggerLocalhost({
+        this.loggerOrigin({
           echoServerData: data.toString(),
           socketWritableEnded: socket.writableEnded,
         });
@@ -175,14 +191,12 @@ class EchoServer {
       });
       // Make sure other end stays half-open long enough to receive the last byte
       socket.on("end", async () => {
-        loggerLocalhost({ localhost: "received FIN" });
+        loggerOrigin({ localhost: "received FIN" });
         await sleep(50);
-        loggerLocalhost({ localhost: "sending last byte and FIN" });
+        loggerOrigin({ localhost: "sending last byte and FIN" });
         socket.end("z");
       });
     });
-
-    this.server = server;
   }
 
   appendData(socket: net.Socket, data: Buffer): void {
@@ -200,10 +214,10 @@ class EchoServer {
   }
 
   async startAndWaitUntilReady() {
-    this.server.listen(this.port);
+    this.server.listen(this.params.originListenPort);
     await new Promise<void>((resolve) =>
       this.server.on("listening", () => {
-        this.loggerLocalhost({ localhost: "listening" });
+        this.loggerOrigin({ localhost: "listening" });
         resolve();
       }),
     );
@@ -216,7 +230,8 @@ class EchoServer {
   createClientSocket(): net.Socket {
     this.loggerBrowser({ browser: "connecting" });
     const socket = net.createConnection({
-      port: this.proxyPort,
+      host: this.params.proxyHost,
+      port: this.params.proxyPort,
       allowHalfOpen: true,
     });
     socket.on("data", (chunk) => {
@@ -234,7 +249,10 @@ class EchoServer {
 
   async expectEconn() {
     return new Promise<void>((resolve, reject) => {
-      const socket = net.createConnection(this.proxyPort);
+      const socket = net.createConnection(
+        this.params.proxyPort,
+        this.params.proxyHost,
+      );
       socket.on("error", () => {});
       socket.on("close", (hadError) => {
         if (hadError) {
@@ -249,7 +267,7 @@ class EchoServer {
   async expectPingPongAndClose(t: TestContext) {
     const conn = await this.createConn(t);
     await new Promise<void>((resolve) => {
-      conn.localhostSocket.once("data", (pong) => {
+      conn.originSocket.once("data", (pong) => {
         t.assert.strictEqual(pong.toString(), "a");
         // Send FIN from client and wait for FIN back
         conn.browserSocket.end();
@@ -275,7 +293,7 @@ class EchoServer {
     });
     await sleep(100);
     const localhostSocket = this.getSocketByPrefix(id);
-    return { browserSocket, localhostSocket };
+    return { browserSocket, originSocket: localhostSocket };
   }
 
   async testConn(
@@ -289,7 +307,7 @@ class EchoServer {
     const conn = await this.createConn(t);
     for (let i = 0; i < numBytes; i++) {
       await new Promise<void>((resolve) => {
-        conn.localhostSocket.once("data", (pong) => {
+        conn.originSocket.once("data", (pong) => {
           t.assert.strictEqual(pong.toString(), "a");
           resolve();
         });
@@ -300,8 +318,8 @@ class EchoServer {
 
     const [socket1, socket2] =
       by === "browser"
-        ? [conn.browserSocket, conn.localhostSocket]
-        : [conn.localhostSocket, conn.browserSocket];
+        ? [conn.browserSocket, conn.originSocket]
+        : [conn.originSocket, conn.browserSocket];
 
     if (term === "FIN") {
       t.assert.strictEqual(socket2.readyState, "open");
@@ -367,65 +385,120 @@ class EchoServer {
   }
 }
 
-await test.only(
+async function withClientAndServer(
+  clientOverrides: Partial<ClientOptions>,
+  serverOverrides: Partial<ServerOptions>,
+  func: (client: TunnelClient, server: TunnelServer) => Promise<void>,
+) {
+  const server = new TunnelServer({ ...serverOptions, ...serverOverrides });
+  server.start();
+  await server.waitUntilListening();
+  const client = new TunnelClient({ ...clientOptions, ...clientOverrides });
+  client.start();
+  await client.waitUntilConnected();
+  await server.waitUntilConnected();
+
+  await func(client, server);
+
+  await client.stop();
+  await server.stop();
+}
+
+async function runTests(t: TestContext, params: EchoServerParams) {
+  for (const term of ["FIN", "RST"] satisfies ("FIN" | "RST")[]) {
+    for (const by of ["browser", "localhost"] satisfies (
+      | "browser"
+      | "localhost"
+    )[]) {
+      console.log(
+        `clean termination by ${by} ${term} on ${params.proxyHost}:${params.proxyPort}`,
+      );
+      const echoServer = new EchoTester(params);
+      await echoServer.startAndWaitUntilReady();
+      // Test single
+      await echoServer.testConn(t, 1, term, by, 0);
+      await echoServer.testConn(t, 4, term, by, 0);
+      // Test double simultaneous
+      await Promise.all([
+        echoServer.testConn(t, 3, term, by, 0),
+        echoServer.testConn(t, 3, term, by, 0),
+      ]);
+      // Test triple delayed
+      await Promise.all([
+        echoServer.testConn(t, 4, term, by, 0),
+        echoServer.testConn(t, 4, term, by, 10),
+        echoServer.testConn(t, 4, term, by, 100),
+      ]);
+      await echoServer.stopAndWaitUntilClosed();
+    }
+  }
+}
+
+await test(
   "basic connection and termination",
   { timeout: 10000 },
   async (t) => {
-    const net = new NetworkEmulator(LOCAL_PORT, PROXY_TEST_PORT);
-    const server = new TunnelServer(serverOptions);
-    const client = new TunnelClient(clientOptions);
-    server.start();
-    client.start();
-    await server.waitUntilListening();
-    await client.waitUntilConnected();
-    await server.waitUntilConnected();
-    await net.startAndWaitUntilReady();
-    for (const term of ["FIN", "RST"] satisfies ("FIN" | "RST")[]) {
-      for (const by of ["browser", "localhost"] satisfies (
-        | "browser"
-        | "localhost"
-      )[]) {
-        for (const proxyPort of [LOCAL_PORT, PROXY_TEST_PORT, PROXY_PORT]) {
-          // if (term !== "RST" || by !== "browser" || proxyPort !== PROXY_PORT) {
-          //   continue;
-          // }
-          // clean termination by browser RST on 14004
-          console.log(`clean termination by ${by} ${term} on ${proxyPort}`);
-          const echoServer = new EchoServer(LOCAL_PORT, proxyPort);
-          await echoServer.startAndWaitUntilReady();
-          // Test single
-          await echoServer.testConn(t, 1, term, by, 0);
-          await echoServer.testConn(t, 4, term, by, 0);
-          // Test double simultaneous
-          await Promise.all([
-            echoServer.testConn(t, 3, term, by, 0),
-            echoServer.testConn(t, 3, term, by, 0),
-          ]);
-          // Test triple delayed
-          await Promise.all([
-            echoServer.testConn(t, 4, term, by, 0),
-            echoServer.testConn(t, 4, term, by, 10),
-            echoServer.testConn(t, 4, term, by, 100),
-          ]);
-          await echoServer.stopAndWaitUntilClosed();
-        }
-      }
-    }
+    for (const localIp of ["127.0.0.1", "::1"]) {
+      // Run EchoServer tests without proxy or tunnel
+      await runTests(t, {
+        originListenHost: localIp,
+        originListenPort: LOCAL_PORT,
+        proxyHost: localIp,
+        proxyPort: LOCAL_PORT,
+      });
 
-    await net.stopAndWaitUntilClosed();
-    await client.stop();
-    await server.stop();
+      // Test NetworkEmulator using EchoServer
+      const net = new NetworkEmulator({
+        listenHost: localIp,
+        listenPort: LOCAL2_PORT,
+        forwardHost: localIp,
+        forwardPort: LOCAL_PORT,
+      });
+      await net.startAndWaitUntilReady();
+      await runTests(t, {
+        originListenHost: localIp,
+        originListenPort: LOCAL_PORT,
+        proxyHost: localIp,
+        proxyPort: LOCAL2_PORT,
+      });
+      await net.stopAndWaitUntilClosed();
+
+      // Test EchoServer through default tunnel
+      await withClientAndServer(
+        {
+          originHost: localIp,
+          tunnelHost: localIp,
+        },
+        {
+          tunnelListenIp: localIp,
+          proxyListenIp: localIp,
+        },
+        async () => {
+          await runTests(t, {
+            originListenHost: localIp,
+            originListenPort: LOCAL_PORT,
+            proxyHost: localIp,
+            proxyPort: PROXY_PORT,
+          });
+        },
+      );
+    }
   },
 );
 
-await test("happy-path", { timeout: 5000 }, async (t) => {
-  const echo = new EchoServer(LOCAL_PORT, PROXY_PORT);
+await test.only("happy-path", { timeout: 5000 }, async (t) => {
+  const echo = new EchoTester({
+    originListenHost: "::1",
+    originListenPort: LOCAL_PORT,
+    proxyHost: "::1",
+    proxyPort: PROXY_PORT,
+  });
   await echo.startAndWaitUntilReady();
 
   const server = new TunnelServer(serverOptions);
   const client = new TunnelClient({
     ...clientOptions,
-    tunnelPort: TUNNEL_TEST_PORT,
+    tunnelPort: TUNNEL2_PORT,
   });
   server.start();
 
@@ -433,7 +506,12 @@ await test("happy-path", { timeout: 5000 }, async (t) => {
   await echo.expectEconn();
 
   await server.waitUntilListening();
-  const net = new NetworkEmulator(TUNNEL_PORT, TUNNEL_TEST_PORT);
+  const net = new NetworkEmulator({
+    listenHost: "::1",
+    listenPort: TUNNEL2_PORT,
+    forwardHost: "::1",
+    forwardPort: TUNNEL_PORT,
+  });
   await net.startAndWaitUntilReady();
   client.start();
 
@@ -442,6 +520,7 @@ await test("happy-path", { timeout: 5000 }, async (t) => {
 
   // Wait until client is connected and test 200
   await client.waitUntilConnected();
+
   // Make two simultaneous slow requests
   await Promise.all([
     echo.expectPingPongAndClose(t),
@@ -478,9 +557,9 @@ await test("happy-path", { timeout: 5000 }, async (t) => {
   await client.waitUntilConnected();
   await echo.expectPingPongAndClose(t);
 
-  // Break tunnel during a request but before response headers could be sent
+  // Break tunnel during a request
   const promise1 = echo.expectEconn();
-  await sleep(10);
+  await sleep(5);
   net.incomingSocket!.resetAndDestroy();
   net.outgoingSocket!.resetAndDestroy();
   await sleep(10);
@@ -493,7 +572,12 @@ await test("happy-path", { timeout: 5000 }, async (t) => {
 });
 
 await test("garbage-to-client", { timeout: 5000 }, async (t: TestContext) => {
-  const echoServer = new EchoServer(LOCAL_PORT, PROXY_PORT);
+  const echoServer = new EchoTester({
+    originListenHost: "::1",
+    originListenPort: LOCAL_PORT,
+    proxyHost: "::1",
+    proxyPort: PROXY_PORT,
+  });
   await echoServer.startAndWaitUntilReady();
   const stopBadServer = await createBadTlsServer(TUNNEL_PORT);
   const client = new TunnelClient(clientOptions);
@@ -518,7 +602,12 @@ await test("garbage-to-client", { timeout: 5000 }, async (t: TestContext) => {
 });
 
 await test("garbage-to-server", { timeout: 5000 }, async (t: TestContext) => {
-  const echoServer = new EchoServer(LOCAL_PORT, PROXY_PORT);
+  const echoServer = new EchoTester({
+    originListenHost: "::1",
+    originListenPort: LOCAL_PORT,
+    proxyHost: "::1",
+    proxyPort: PROXY_PORT,
+  });
   await echoServer.startAndWaitUntilReady();
   const server = new TunnelServer(serverOptions);
   server.start();

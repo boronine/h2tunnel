@@ -49,7 +49,7 @@ usage: h2tunnel <command> [options]
 commands:
   client
   server
-
+ 
 client options:
   --crt <path>                 Path to certificate file (.crt)
   --key <path>                 Path to private key file (.key)
@@ -61,14 +61,14 @@ client options:
 server options:
   --crt <path>                 Path to certificate file (.crt)
   --key <path>                 Path to private key file (.key)
-  --tunnel-listen-ip <ip>      IP for the tunnel server to bind on (default: 0.0.0.0)
+  --tunnel-listen-ip <ip>      IP for the tunnel server to bind on (default: ::0)
   --tunnel-listen-port <port>  Port for the tunnel server to listen on
-  --proxy-listen-ip <ip>       IP for the remote TCP proxy server to bind on (default: 0.0.0.0)
+  --proxy-listen-ip <ip>       IP for the remote TCP proxy server to bind on (default: ::0)
   --proxy-listen-port <port>   Port for the remote TCP proxy server to listen on
-
-The tunnel and proxy servers will bind to 0.0.0.0 by default which will make them publically available. This requires
+  
+The tunnel and proxy servers will bind to ::0 by default which will make them publically available. This requires
 superuser permissions on Linux. You can change this setting to bind to a specific network interface, e.g. a VPN, but
-this is advanced usage.
+this is advanced usage. Note that on most operating systems, binding to ::0 will also bind to 0.0.0.0.
 ```
 
 Generate `h2tunnel.key` and `h2tunnel.crt` files using `openssl` command:
@@ -83,7 +83,7 @@ On your server (mysite.example.com), we will be listening for tunnel connections
 proxy on port 80. Make sure these are open in your firewall.
 
 ```bash
-# sudo is required to bind to 0.0.0.0, which is necessary for public access
+# sudo is required to bind to ::0, which is necessary for public access
 sudo h2tunnel server \
   --crt h2tunnel.crt \
   --key h2tunnel.key \
@@ -169,9 +169,9 @@ const server = new TunnelServer({
   logger: (line) => console.log(line), // optional
   key: `-----BEGIN PRIVATE KEY----- ...`,
   cert: `-----BEGIN CERTIFICATE----- ...`,
-  tunnelListenIp: "0.0.0.0", // optional
+  tunnelListenIp: "::0", // optional
   tunnelListenPort: 15001,
-  proxyListenIp: "0.0.0.0", // optional
+  proxyListenIp: "::0", // optional
   proxyListenPort: 80,
 });
 

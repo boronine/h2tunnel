@@ -12,8 +12,9 @@ export interface CommonOptions {
   cert: string;
 }
 
-export const DEFAULT_LISTEN_IP = "0.0.0.0";
+export const DEFAULT_LISTEN_IP = "::0";
 export const DEFAULT_ORIGIN_HOST = "localhost";
+export const MUX_SERVER_HOST = "127.0.0.1";
 
 export interface ServerOptions extends CommonOptions {
   tunnelListenIp?: string;
@@ -37,10 +38,11 @@ export abstract class AbstractTunnel<
   M extends net.Server,
 > extends events.EventEmitter<Record<TunnelState, []>> {
   state: TunnelState = "stopped";
-  aborted: boolean;
+  aborted: boolean = false;
+  connected: boolean = false;
   tunnelSocket: tls.TLSSocket | null = null;
   muxSocket: net.Socket | null = null;
-  h2session: S | null = null;
+  h2Session: S | null = null;
   abstract init(): void;
   abstract isListening(): boolean;
   protected constructor(
@@ -54,7 +56,10 @@ export abstract class AbstractTunnel<
       this.log({ muxServer: "drop", options });
     });
     muxServer.on("listening", () => {
-      this.log({ muxServer: "listening", port: this.muxServerPort });
+      this.log({
+        muxServer: "listening",
+        ...(muxServer.address() as net.AddressInfo),
+      });
       this.updateHook();
     });
     muxServer.on("error", (err) => {
@@ -71,14 +76,15 @@ export abstract class AbstractTunnel<
   }
 
   setH2Session(session: S) {
-    this.h2session = session;
-    this.h2session.on("close", () => {
-      this.log({ h2session: "close" });
-      this.h2session = null;
+    this.h2Session = session;
+    this.h2Session.on("close", () => {
+      this.log({ h2Session: "close" });
+      this.h2Session = null;
+      this.connected = false;
       this.updateHook();
     });
-    this.h2session.on("error", (err) => {
-      this.log({ h2session: "error", err });
+    this.h2Session.on("error", (err) => {
+      this.log({ h2Session: "error", err });
     });
   }
 
@@ -113,8 +119,9 @@ export abstract class AbstractTunnel<
     this.tunnelSocket.on("close", () => {
       this.log({ tunnelSocket: "close", error: socket.errored });
       this.muxSocket?.destroy();
-      // Make sure error cascades to all active HTTP2 streams
-      this.h2session?.destroy(socket.errored ? new Error() : undefined);
+      // Regardless of why the tunnel closes, if there are ongoing HTTP2 streams, they have to be destroyed with an error
+      this.h2Session?.destroy(new Error());
+      this.connected = false;
       this.updateHook();
     });
     this.linkSocketsIfNecessary();
@@ -175,7 +182,7 @@ export abstract class AbstractTunnel<
     let state: TunnelState;
     if (this.aborted) {
       state = this.isStopped() ? "stopped" : "stopping";
-    } else if (this.h2session && this.tunnelSocket?.readyState === "open") {
+    } else if (this.connected) {
       state = "connected";
     } else if (this.isListening()) {
       if (this.muxServer.listening) {
@@ -183,7 +190,7 @@ export abstract class AbstractTunnel<
         state = "listening";
       } else {
         this.log({ muxServer: "starting" });
-        this.muxServer.listen(); // Let the OS pick a port
+        this.muxServer.listen(0, MUX_SERVER_HOST); // Let the OS pick a port
         state = "stopped";
       }
     } else {
@@ -205,7 +212,6 @@ export abstract class AbstractTunnel<
 
   isStopped() {
     return (
-      !this.h2session &&
       !this.muxServer.listening &&
       !this.muxSocket &&
       (!this.tunnelSocket || this.tunnelSocket.closed)
@@ -216,7 +222,7 @@ export abstract class AbstractTunnel<
     this.log({ aborting: true });
     this.muxSocket?.destroy();
     this.tunnelSocket?.destroy();
-    this.h2session?.destroy();
+    this.h2Session?.destroy();
     this.muxServer?.close();
     this.updateHook();
   }
@@ -262,19 +268,22 @@ export class TunnelServer extends AbstractTunnel<
     });
     proxyServer.on("connection", (socket: net.Socket) => {
       this.log({ proxyServer: "connection" });
-      if (!this.h2session || this.h2session.destroyed) {
+      if (!this.connected) {
         socket.resetAndDestroy();
       } else {
         this.addDemuxSocket(
           socket,
-          this.h2session.request({
+          this.h2Session!.request({
             [http2.constants.HTTP2_HEADER_METHOD]: "POST",
           }),
         );
       }
     });
     proxyServer.on("listening", () => {
-      this.log({ proxyServer: "listening" });
+      this.log({
+        proxyServer: "listening",
+        ...(proxyServer.address() as net.AddressInfo),
+      });
       this.updateHook();
     });
     proxyServer.on("close", () => {
@@ -286,7 +295,10 @@ export class TunnelServer extends AbstractTunnel<
       this.log({ tunnelServer: "drop", options });
     });
     tunnelServer.on("listening", () => {
-      this.log({ tunnelServer: "listening" });
+      this.log({
+        tunnelServer: "listening",
+        ...(tunnelServer.address() as net.AddressInfo),
+      });
       this.updateHook();
     });
     tunnelServer.on("close", () => {
@@ -338,14 +350,17 @@ export class TunnelServer extends AbstractTunnel<
   }
 
   init() {
-    if (this.tunnelSocket && !this.tunnelSocket.closed && !this.h2session) {
-      this.log({ muxSession: "starting" });
-      const session = http2.connect(`http://localhost:${this.muxServerPort}`);
-      session.on("connect", () => {
-        this.log({ h2session: "connect" });
+    if (this.tunnelSocket && !this.tunnelSocket.closed && !this.h2Session) {
+      this.log({ h2Session: "starting" });
+      const h2Session = http2.connect(
+        `http://${MUX_SERVER_HOST}:${this.muxServerPort}`,
+      );
+      h2Session.on("connect", () => {
+        this.log({ h2Session: "connect" });
+        this.connected = true;
         this.updateHook();
       });
-      this.setH2Session(session);
+      this.setH2Session(h2Session);
     }
   }
 
@@ -363,20 +378,25 @@ export class TunnelClient extends AbstractTunnel<
 
   constructor(readonly options: ClientOptions) {
     super(options.logger, http2.createServer());
-    this.muxServer.on("session", (session: http2.ServerHttp2Session) => {
+    this.muxServer.on("session", (h2Session) => {
       this.log({ muxServer: "session" });
-      this.setH2Session(session);
-      session.on("stream", (stream: http2.ServerHttp2Stream) => {
-        this.addDemuxSocket(
-          net.createConnection({
-            host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,
-            port: this.options.originPort,
-            allowHalfOpen: true,
-          }),
-          stream,
-        );
+      h2Session.on("remoteSettings", () => {
+        this.log({ h2Session: "remoteSettings" });
+        this.connected = true;
+        this.updateHook();
       });
-      this.updateHook();
+      this.setH2Session(h2Session);
+    });
+    this.muxServer.on("stream", (stream: http2.ServerHttp2Stream) => {
+      this.log({ muxServer: "stream" });
+      this.addDemuxSocket(
+        net.createConnection({
+          host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,
+          port: this.options.originPort,
+          allowHalfOpen: true,
+        }),
+        stream,
+      );
     });
   }
 
@@ -413,7 +433,7 @@ export class TunnelClient extends AbstractTunnel<
   init() {
     if (!this.muxSocket) {
       const muxSocket = net.createConnection({
-        host: "localhost",
+        host: MUX_SERVER_HOST,
         port: this.muxServerPort,
       });
       muxSocket.on("connect", () => {
