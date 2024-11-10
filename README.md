@@ -41,6 +41,14 @@ h2tunnel globally like so:
 npm install -g h2tunnel
 ```
 
+Minimum Node.js version: v18. Ubuntu 24.04+ and Debian 12+ have this version in their repositories:
+
+```bash
+sudo apt install nodejs npm
+```
+
+For other operating systems, you may need to [install Node.js another way](https://nodejs.org/en/download/package-manager).
+
 ## Usage
 
 ```

@@ -57,6 +57,6 @@
     "coverage": "npx tsc && c8 --reporter html node build/h2tunnel.test.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   }
 }
