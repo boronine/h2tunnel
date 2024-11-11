@@ -1,3 +1,8 @@
+### 0.3.1
+
+- Add IPv6 support
+- Add Node.js v18 support
+
 ### 0.3.0
 
 - Support tunneling half-closed TCP connections, these are sometimes killed by middleboxes but they will be safe in h2tunnel
