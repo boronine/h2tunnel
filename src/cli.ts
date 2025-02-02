@@ -128,5 +128,4 @@ if (positionals.length === 0) {
   process.on("SIGINT", () => tunnel.stop());
   process.on("SIGTERM", () => tunnel.stop());
   tunnel.start();
-  await tunnel.waitUntilState("stopped");
 }

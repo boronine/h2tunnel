@@ -1,19 +1,19 @@
 import net from "node:net";
 import events from "node:events";
-import * as http2 from "node:http2";
-import * as tls from "node:tls";
+import http2 from "node:http2";
+import tls from "node:tls";
 import stream from "node:stream";
-
-export type TunnelState = "listening" | "connected" | "stopped" | "stopping";
+import { ClientHttp2Stream } from "http2";
 
 export interface CommonOptions {
-  logger?: (line: object) => void;
+  logger?: (line: any) => void;
   key: string;
   cert: string;
 }
 
 export const DEFAULT_LISTEN_IP = "::0";
 export const DEFAULT_ORIGIN_HOST = "localhost";
+export const DEFAULT_TUNNEL_RESTART_TIMEOUT = 1000;
 export const MUX_SERVER_HOST = "127.0.0.1";
 
 export interface ServerOptions extends CommonOptions {
@@ -31,216 +31,168 @@ export interface ClientOptions extends CommonOptions {
   tunnelRestartTimeout?: number;
 }
 
-const DEFAULT_TUNNEL_RESTART_TIMEOUT = 1000;
+const formatAddr = (family?: string, address?: string, port?: number) =>
+  family === "IPv6" ? `[${address}]:${port}` : `${address}:${port}`;
+
+const formatRemote = (socket: net.Socket) =>
+  formatAddr(socket.remoteFamily, socket.remoteAddress, socket.remotePort);
+
+const formatLocal = (socket: net.Socket) =>
+  formatAddr(socket.localFamily, socket.localAddress, socket.localPort);
+
+type Servers = "muxServer" | "proxyServer" | "tunnelServer";
+type Stream = `stream${number}`;
+
+export type LogLine =
+  | `connected to ${string} from ${string}`
+  | `rejecting connection from ${string}`
+  | `${Stream} ${"send" | "recv"} ${"FIN" | "RST" | number}`
+  | `${Stream} closed`
+  | `${Servers | Stream} error ${string}`
+  | `${Stream} forwarding to ${string}` // client: local address which we connect to
+  | `${Stream} forwarded from ${string}` // server: remote address connecting to proxy server
+  | "connecting"
+  | "disconnected"
+  | "listening"
+  | "stopping"
+  | "stopped"
+  | `restarting`;
+
+interface Closeable {
+  close(): void;
+  on(event: "close", listener: () => void): void;
+}
+
+interface Destroyable {
+  destroy(): void;
+  on(event: "close", listener: () => void): void;
+}
+
+export class Stoppable {
+  closeables: Set<Closeable> = new Set();
+  destroyables: Set<Destroyable> = new Set();
+  timeouts: Set<NodeJS.Timeout> = new Set();
+  addCloseable(closeable: Closeable) {
+    this.closeables.add(closeable);
+    closeable.on("close", () => this.closeables.delete(closeable));
+  }
+  addDestroyable(destroyable: Destroyable) {
+    this.destroyables.add(destroyable);
+    destroyable.on("close", () => this.destroyables.delete(destroyable));
+  }
+  setTimeout(callback: () => void, ms: number): NodeJS.Timeout {
+    const timeout = setTimeout(() => {
+      this.timeouts.delete(timeout);
+      callback();
+    }, ms);
+    this.timeouts.add(timeout);
+    return timeout;
+  }
+  async stop() {
+    [...this.timeouts].forEach(clearTimeout);
+    [...this.closeables].forEach((closeable) => closeable.close());
+    [...this.destroyables].forEach((closeable) => closeable.destroy());
+    await Promise.all(
+      [...this.closeables, ...this.destroyables].map(
+        (closeable) =>
+          new Promise<void>((resolve) => closeable.on("close", resolve)),
+      ),
+    );
+  }
+}
 
 export abstract class AbstractTunnel<
   S extends http2.Http2Session,
   M extends net.Server,
-> extends events.EventEmitter<Record<TunnelState, []>> {
-  state: TunnelState = "stopped";
+> extends Stoppable {
+  // Due to Node.js bug, we have seen HTTP2 sessions that were destroyed before "close" event was emitted, so we always have to check for "destroyed"
+  session: S | null = null;
+  activeStreams: Map<http2.Http2Stream, net.Socket> = new Map();
   aborted: boolean = false;
-  connected: boolean = false;
-  tunnelSocket: tls.TLSSocket | null = null;
-  muxSocket: net.Socket | null = null;
-  h2Session: S | null = null;
-  abstract init(): void;
-  abstract isListening(): boolean;
+  connectedEvent = new events.EventEmitter<Record<"connected", []>>();
+
   protected constructor(
-    readonly log: (line: object) => void = (line) =>
-      process.stdout.write(JSON.stringify(line) + "\n"),
+    readonly log: (line: LogLine) => void = (line) =>
+      process.stdout.write(line + "\n"),
     readonly muxServer: M,
   ) {
     super();
-    muxServer.maxConnections = 1;
-    muxServer.on("drop", (options) => {
-      this.log({ muxServer: "drop", options });
-    });
-    muxServer.on("listening", () => {
-      this.log({
-        muxServer: "listening",
-        ...(muxServer.address() as net.AddressInfo),
-      });
-      this.updateHook();
-    });
-    muxServer.on("error", (err) => {
-      this.log({ muxServer: "error", err });
-    });
-    muxServer.on("close", () => {
-      this.log({ muxServer: "close" });
-      this.updateHook();
-    });
-  }
-
-  get muxServerPort(): number {
-    return (this.muxServer.address() as net.AddressInfo).port;
-  }
-
-  setH2Session(session: S) {
-    this.h2Session = session;
-    this.h2Session.on("close", () => {
-      this.log({ h2Session: "close" });
-      this.h2Session = null;
-      this.connected = false;
-      this.updateHook();
-    });
-    this.h2Session.on("error", (err) => {
-      this.log({ h2Session: "error", err });
-    });
-  }
-
-  linkSocketsIfNecessary() {
-    if (this.tunnelSocket && !this.tunnelSocket.closed && this.muxSocket) {
-      this.tunnelSocket.pipe(this.muxSocket);
-      this.muxSocket.pipe(this.tunnelSocket);
-      this.log({ linked: true });
-    }
-  }
-
-  setMuxSocket(socket: net.Socket) {
-    this.muxSocket = socket;
-    this.muxSocket.on("error", (err) => {
-      this.log({ muxSocket: "error", err });
-    });
-    this.muxSocket.on("close", () => {
-      this.log({ muxSocket: "close" });
-      this.muxSocket = null;
-      if (this.aborted) {
-        this.muxServer.close();
-      }
-      this.updateHook();
-    });
-    this.linkSocketsIfNecessary();
-  }
-
-  setTunnelSocket(socket: tls.TLSSocket) {
-    this.tunnelSocket = socket;
-    // Error will be handled in the 'close' event below
-    this.tunnelSocket.on("error", () => {});
-    this.tunnelSocket.on("close", () => {
-      this.log({ tunnelSocket: "close", error: socket.errored });
-      this.muxSocket?.destroy();
-      // Regardless of why the tunnel closes, if there are ongoing HTTP2 streams, they have to be destroyed with an error
-      this.h2Session?.destroy(new Error());
-      this.connected = false;
-      this.updateHook();
-    });
-    this.linkSocketsIfNecessary();
-  }
-
-  addDemuxSocket(socket: net.Socket, stream: http2.Http2Stream): void {
-    const log = (line: object) => {
-      this.log({ streamId: stream.id, ...line });
-    };
-    log({ demux: "added" });
-
-    const setup = (duplex1: stream.Duplex, duplex2: stream.Duplex) => {
-      const isStream = duplex1 === stream;
-      const tag = isStream ? "demuxStream" : "demuxSocket";
-      duplex1.on("data", (chunk) => {
-        log({
-          [isStream ? "readBytes" : "writeBytes"]: chunk.length,
-        });
-        duplex2.write(chunk);
-      });
-      // Catch error but do not handle it, we will handle it later during the 'close' event
-      duplex1.on("error", () => {});
-      let endTimeout: NodeJS.Timeout | null = null;
-      duplex1.on("end", () => {
-        log({ [tag]: "end" });
-        if (!duplex2.writableEnded) {
-          log({ [tag]: "closing opposite" });
-          duplex2.end();
-        }
-      });
-
-      duplex1.on("close", () => {
-        log({
-          [tag]: "close",
-          errored: duplex1.errored,
-          oppositeAlreadyDestroyed: duplex2.destroyed,
-        });
-        if (duplex1.errored && !duplex2.destroyed) {
-          if (endTimeout) {
-            clearTimeout(endTimeout);
-          }
-          if (isStream) {
-            log({ [tag]: "destroying socket" });
-            socket.resetAndDestroy();
-          } else {
-            log({ [tag]: "destroying stream" });
-            stream.destroy(new Error());
-          }
-        }
-      });
-    };
-
-    setup(socket, stream);
-    setup(stream, socket);
-  }
-
-  updateHook() {
-    let state: TunnelState;
-    if (this.aborted) {
-      state = this.isStopped() ? "stopped" : "stopping";
-    } else if (this.connected) {
-      state = "connected";
-    } else if (this.isListening()) {
-      if (this.muxServer.listening) {
-        this.init();
-        state = "listening";
-      } else {
-        this.log({ muxServer: "starting" });
-        this.muxServer.listen(0, MUX_SERVER_HOST); // Let the OS pick a port
-        state = "stopped";
-      }
-    } else {
-      state = "stopped";
-    }
-
-    if (state !== this.state) {
-      this.state = state;
-      this.log({ state });
-      this.emit(state);
-    }
-  }
-
-  start() {
-    this.log({ starting: true, pid: process.pid });
-    this.aborted = false;
-    this.updateHook();
-  }
-
-  isStopped() {
-    return (
-      !this.muxServer.listening &&
-      !this.muxSocket &&
-      (!this.tunnelSocket || this.tunnelSocket.closed)
+    muxServer.on("error", (err) =>
+      this.log(`muxServer error ${err.toString()}`),
     );
   }
 
-  onAbort() {
-    this.log({ aborting: true });
-    this.muxSocket?.destroy();
-    this.tunnelSocket?.destroy();
-    this.h2Session?.destroy();
-    this.muxServer?.close();
-    this.updateHook();
+  getMuxServerPort(): number {
+    return (this.muxServer.address() as net.AddressInfo).port;
   }
 
-  async waitUntilState(state: TunnelState): Promise<void> {
-    if (this.state !== state) {
-      await new Promise<void>((resolve) => this.once(state, resolve));
-    }
+  addStream(
+    streamId: number,
+    socket: net.Socket,
+    stream: http2.Http2Stream,
+  ): void {
+    this.activeStreams.set(stream, socket);
+    // Error can be on the socket side or on the stream side. Socket error is logged as error, stream error is logged as RST
+    socket.on("error", (error) => {
+      this.log(`stream${streamId} error ${error.toString()}`);
+      this.log(`stream${streamId} send RST`);
+    });
+    stream.on("error", () => {
+      // Make sure stream error is received from the network and not from the socket
+      if (!socket.errored) {
+        this.log(`stream${streamId} recv RST`);
+      }
+    });
+    stream.on("close", () => {
+      this.log(`stream${streamId} closed`);
+      this.activeStreams.delete(stream);
+    });
+    const setup = (
+      duplex1: stream.Duplex,
+      duplex2: stream.Duplex,
+      t: "send" | "recv",
+      destroyDuplex2: () => void,
+    ) => {
+      duplex1.on("data", (chunk: Buffer) => {
+        this.log(`stream${streamId} ${t} ${chunk.length}`);
+        duplex2.write(chunk);
+      });
+      duplex1.on("end", () => {
+        this.log(`stream${streamId} ${t} FIN`);
+        if (!duplex2.writableEnded) {
+          duplex2.end();
+        }
+      });
+      duplex1.on("close", () => {
+        if (duplex1.errored && !duplex2.destroyed) {
+          destroyDuplex2();
+        }
+      });
+    };
+
+    setup(socket, stream, "send", () => stream.destroy(new Error()));
+    setup(stream, socket, "recv", () => socket.resetAndDestroy());
   }
 
-  async waitUntilConnected() {
-    await this.waitUntilState("connected");
+  start() {
+    this.aborted = false;
+    this.addCloseable(this.muxServer);
+    this.muxServer.listen(0, MUX_SERVER_HOST); // Let the OS pick a port
   }
 
   async stop() {
+    this.log("stopping");
     this.aborted = true;
-    this.onAbort();
-    await this.waitUntilState("stopped");
+    await super.stop();
+    this.log("stopped");
+  }
+
+  async waitUntilConnected() {
+    if (!this.session || this.session.destroyed) {
+      await new Promise<void>((resolve) =>
+        this.connectedEvent.once("connected", resolve),
+      );
+    }
   }
 }
 
@@ -248,6 +200,7 @@ export class TunnelServer extends AbstractTunnel<
   http2.ClientHttp2Session,
   net.Server
 > {
+  listeningEvent = new events.EventEmitter<Record<"listening", []>>();
   constructor(
     readonly options: ServerOptions,
     readonly tunnelServer = tls.createServer({
@@ -261,111 +214,96 @@ export class TunnelServer extends AbstractTunnel<
     readonly proxyServer = net.createServer({ allowHalfOpen: true }),
   ) {
     super(options.logger, net.createServer());
-    this.muxServer.on("connection", (socket: net.Socket) => {
-      this.log({ muxServer: "connection", address: socket.address() });
-      this.setMuxSocket(socket);
-      this.updateHook();
-    });
     proxyServer.on("connection", (socket: net.Socket) => {
-      this.log({ proxyServer: "connection" });
-      if (!this.connected) {
+      this.addDestroyable(socket);
+      if (!this.session || this.session.destroyed || this.aborted) {
+        this.log(`rejecting connection from ${formatRemote(socket)}`);
         socket.resetAndDestroy();
       } else {
-        this.addDemuxSocket(
-          socket,
-          this.h2Session!.request({
-            [http2.constants.HTTP2_HEADER_METHOD]: "POST",
-          }),
+        const streamId = this.activeStreams.size;
+        this.log(`stream${streamId} forwarded from ${formatRemote(socket)}`);
+        const session = this.session.request({
+          [http2.constants.HTTP2_HEADER_METHOD]: "POST",
+        });
+        this.addDestroyable(session);
+        this.addStream(streamId, socket, session);
+      }
+    });
+    proxyServer.on("error", (err) =>
+      this.log(`proxyServer error ${err.toString()}`),
+    );
+    tunnelServer.on("error", (err) =>
+      this.log(`tunnelServer error ${err.toString()}`),
+    );
+    tunnelServer.on("secureConnection", (tunnelSocket: tls.TLSSocket) => {
+      this.addDestroyable(tunnelSocket);
+      tunnelSocket.on("error", () => {});
+      tunnelSocket.on("close", () => this.session?.destroy(new Error()));
+      // TODO: make sure latest tunnel kills previous tunnel
+      const session: http2.ClientHttp2Session = http2.connect(
+        `http://${MUX_SERVER_HOST}:${this.getMuxServerPort()}`,
+      );
+      this.addDestroyable(session);
+      session.on("close", () => {
+        tunnelSocket.destroy();
+        this.log(`disconnected`);
+      });
+      session.on("error", () => {});
+      session.on("connect", () => {
+        this.session = session;
+        this.log(
+          `connected to ${formatLocal(tunnelSocket)} from ${formatRemote(tunnelSocket)}`,
         );
-      }
-    });
-    proxyServer.on("listening", () => {
-      this.log({
-        proxyServer: "listening",
-        ...(proxyServer.address() as net.AddressInfo),
+        this.connectedEvent.emit("connected");
       });
-      this.updateHook();
-    });
-    proxyServer.on("close", () => {
-      this.log({ proxyServer: "close" });
-      this.updateHook();
-    });
-    tunnelServer.maxConnections = 1;
-    tunnelServer.on("drop", (options) => {
-      this.log({ tunnelServer: "drop", options });
-    });
-    tunnelServer.on("listening", () => {
-      this.log({
-        tunnelServer: "listening",
-        ...(tunnelServer.address() as net.AddressInfo),
+      this.muxServer.once("connection", (muxSocket: net.Socket) => {
+        this.addDestroyable(muxSocket);
+        session.on("close", () => muxSocket.destroy());
+        tunnelSocket.pipe(muxSocket);
+        muxSocket.pipe(tunnelSocket);
       });
-      this.updateHook();
-    });
-    tunnelServer.on("close", () => {
-      this.log({ tunnelServer: "close" });
-      this.updateHook();
-    });
-    tunnelServer.on("error", (err) => {
-      this.log({ tunnelServer: "error", err });
-    });
-    tunnelServer.on("secureConnection", (socket: tls.TLSSocket) => {
-      if (!this.aborted) {
-        this.log({ tunnelServer: "secureConnection" });
-        this.setTunnelSocket(socket);
-        this.updateHook();
-      }
     });
   }
 
+  isListening() {
+    return (
+      this.muxServer.listening &&
+      this.proxyServer.listening &&
+      this.tunnelServer.listening
+    );
+  }
+
   start() {
-    this.log({ proxyServer: "starting" });
+    super.start();
+    this.addCloseable(this.proxyServer);
+    this.addCloseable(this.tunnelServer);
+    let listening = false;
+    const hook = () => {
+      if (!listening && this.isListening()) {
+        listening = true;
+        this.log("listening");
+        this.listeningEvent.emit("listening");
+      }
+    };
+    this.muxServer.once("listening", hook);
+    this.proxyServer.once("listening", hook);
+    this.tunnelServer.once("listening", hook);
     this.proxyServer.listen(
       this.options.proxyListenPort,
       this.options.proxyListenIp ?? DEFAULT_LISTEN_IP,
     );
-    this.log({ tunnelServer: "starting" });
     this.tunnelServer.listen(
       this.options.tunnelListenPort,
       this.options.tunnelListenIp ?? DEFAULT_LISTEN_IP,
     );
-    super.start();
-  }
-
-  onAbort() {
-    super.onAbort();
-    this.proxyServer?.close();
-    this.tunnelServer?.close();
-  }
-
-  isStopped() {
-    return (
-      super.isStopped() &&
-      !this.proxyServer.listening &&
-      !this.tunnelServer.listening
-    );
-  }
-
-  isListening() {
-    return this.proxyServer.listening && this.tunnelServer.listening;
-  }
-
-  init() {
-    if (this.tunnelSocket && !this.tunnelSocket.closed && !this.h2Session) {
-      this.log({ h2Session: "starting" });
-      const h2Session = http2.connect(
-        `http://${MUX_SERVER_HOST}:${this.muxServerPort}`,
-      );
-      h2Session.on("connect", () => {
-        this.log({ h2Session: "connect" });
-        this.connected = true;
-        this.updateHook();
-      });
-      this.setH2Session(h2Session);
-    }
   }
 
   async waitUntilListening() {
-    await this.waitUntilState("listening");
+    if (!this.isListening()) {
+      await new Promise<void>((resolve) =>
+        this.listeningEvent.once("listening", resolve),
+      );
+    }
   }
 }
 
@@ -374,35 +312,23 @@ export class TunnelClient extends AbstractTunnel<
   http2.Http2Server
 > {
   // The tunnel will not restart as long as this property is not null
-  tunnelSocketRestartTimeout: NodeJS.Timeout | null = null;
+  restartTimeout: NodeJS.Timeout | null = null;
 
   constructor(readonly options: ClientOptions) {
     super(options.logger, http2.createServer());
-    this.muxServer.on("session", (h2Session) => {
-      this.log({ muxServer: "session" });
-      h2Session.on("remoteSettings", () => {
-        this.log({ h2Session: "remoteSettings" });
-        this.connected = true;
-        this.updateHook();
-      });
-      this.setH2Session(h2Session);
-    });
-    this.muxServer.on("stream", (stream: http2.ServerHttp2Stream) => {
-      this.log({ muxServer: "stream" });
-      this.addDemuxSocket(
-        net.createConnection({
-          host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,
-          port: this.options.originPort,
-          allowHalfOpen: true,
-        }),
-        stream,
-      );
-    });
+    this.muxServer.on("listening", () => this.startTunnel());
+  }
+
+  start() {
+    super.start();
+    this.log("connecting");
   }
 
   startTunnel() {
-    this.log({ tunnelSocket: "starting" });
-    const socket = tls.connect({
+    if (this.restartTimeout) {
+      clearTimeout(this.restartTimeout);
+    }
+    const tunnelSocket = tls.connect({
       host: this.options.tunnelHost,
       port: this.options.tunnelPort,
       cert: this.options.cert,
@@ -411,50 +337,57 @@ export class TunnelClient extends AbstractTunnel<
       // Necessary only if the server's cert isn't for "localhost".
       checkServerIdentity: () => undefined,
     });
-    socket.on("secureConnect", () => {
-      this.log({ tunnelSocket: "secureConnect" });
-      this.updateHook();
+    this.addDestroyable(tunnelSocket);
+    tunnelSocket.on("error", () => {});
+    tunnelSocket.on("close", () => {
+      if (!this.session?.destroyed) {
+        this.session?.destroy(new Error());
+      }
+      if (!this.aborted) {
+        this.restartTimeout = this.setTimeout(() => {
+          this.log("restarting");
+          this.startTunnel();
+        }, this.options.tunnelRestartTimeout ?? DEFAULT_TUNNEL_RESTART_TIMEOUT);
+      }
     });
-    this.setTunnelSocket(socket);
-  }
-
-  isListening() {
-    return true;
-  }
-
-  onAbort() {
-    if (this.tunnelSocketRestartTimeout) {
-      clearTimeout(this.tunnelSocketRestartTimeout);
-      this.tunnelSocketRestartTimeout = null;
-    }
-    super.onAbort();
-  }
-
-  init() {
-    if (!this.muxSocket) {
+    tunnelSocket.on("secureConnect", () => {
+      // We don't have to wait for muxSocket to connect before we can start using it
       const muxSocket = net.createConnection({
         host: MUX_SERVER_HOST,
-        port: this.muxServerPort,
+        port: this.getMuxServerPort(),
       });
-      muxSocket.on("connect", () => {
-        this.log({ muxSocket: "connect" });
-        this.updateHook();
+      this.addDestroyable(muxSocket);
+      tunnelSocket.pipe(muxSocket);
+      muxSocket.pipe(tunnelSocket);
+
+      this.muxServer.once("session", (session: http2.ServerHttp2Session) => {
+        this.addDestroyable(session);
+        session.on("close", () => {
+          tunnelSocket.destroy();
+          muxSocket.destroy();
+          this.log(`disconnected`);
+        });
+        session.on("error", () => {});
+        this.session = session;
+        this.log(
+          `connected to ${formatRemote(tunnelSocket)} from ${formatLocal(tunnelSocket)}`,
+        );
+        this.connectedEvent.emit("connected");
+        session.on("stream", (stream: ClientHttp2Stream) => {
+          this.addDestroyable(stream);
+          const socket = net.createConnection({
+            host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,
+            port: this.options.originPort,
+            allowHalfOpen: true,
+          });
+          this.addDestroyable(socket);
+          socket.on("connect", () => {
+            const streamId = this.activeStreams.size;
+            this.log(`stream${streamId} forwarding to ${formatLocal(socket)}`);
+            this.addStream(streamId, socket, stream);
+          });
+        });
       });
-      this.setMuxSocket(muxSocket);
-    }
-    if (!this.tunnelSocketRestartTimeout) {
-      if (!this.tunnelSocket) {
-        this.startTunnel();
-      } else if (this.tunnelSocket.closed) {
-        const timeout =
-          this.options.tunnelRestartTimeout ?? DEFAULT_TUNNEL_RESTART_TIMEOUT;
-        this.log({ tunnelSocketWillRestart: timeout });
-        this.tunnelSocketRestartTimeout = setTimeout(() => {
-          this.tunnelSocketRestartTimeout = null;
-          this.startTunnel();
-          this.updateHook();
-        }, timeout);
-      }
-    }
+    });
   }
 }

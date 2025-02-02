@@ -57,7 +57,7 @@ usage: h2tunnel <command> [options]
 commands:
   client
   server
- 
+
 client options:
   --crt <path>                 Path to certificate file (.crt)
   --key <path>                 Path to private key file (.key)
@@ -73,7 +73,7 @@ server options:
   --tunnel-listen-port <port>  Port for the tunnel server to listen on
   --proxy-listen-ip <ip>       IP for the remote TCP proxy server to bind on (default: ::0)
   --proxy-listen-port <port>   Port for the remote TCP proxy server to listen on
-  
+
 The tunnel and proxy servers will bind to ::0 by default which will make them publically available. This requires
 superuser permissions on Linux. You can change this setting to bind to a specific network interface, e.g. a VPN, but
 this is advanced usage. Note that on most operating systems, binding to ::0 will also bind to 0.0.0.0.
@@ -187,10 +187,10 @@ const server = new TunnelServer({
 server.start();
 
 // Wait until server is listening
-await client.waitUntilListening();
+await server.waitUntilListening();
 
 // Wait until server is connected
-await client.waitUntilConnected();
+await server.waitUntilConnected();
 
 // Stop the server
 await server.stop();
