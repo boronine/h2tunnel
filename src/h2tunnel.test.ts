@@ -942,3 +942,45 @@ await test("garbage-to-server", { timeout: 5000 }, async () => {
   await server.stop();
   await echoServer.stop();
 });
+
+await test.only("latency", { timeout: 30000 }, async () => {
+  for (const localIp of ["127.0.0.1", "::1"]) {
+    await withClientAndServer(
+      {
+        originHost: localIp,
+        tunnelHost: localIp,
+        logger: () => {},
+      },
+      {
+        tunnelListenIp: localIp,
+        proxyListenIp: localIp,
+        logger: () => {},
+      },
+      async () => {
+        const stoppable = new Stoppable();
+        const originServer = net.createServer();
+        originServer.on("connection", (socket) => {
+          socket.write("x");
+          socket.end();
+        });
+        stoppable.addCloseable(originServer);
+        await new Promise<void>((resolve) =>
+          originServer.listen(LOCAL_PORT, localIp, resolve),
+        );
+
+        const ts1 = performance.now();
+        const numSamples = 100;
+        for (let i = 0; i < numSamples; i++) {
+          const socket = net.createConnection(PROXY_PORT, localIp);
+          stoppable.addDestroyable(socket);
+          await new Promise<void>((resolve) => socket.on("data", resolve));
+          socket.end();
+        }
+        const ts2 = performance.now();
+        console.log(`latency on ${localIp}`, (ts2 - ts1) / numSamples);
+
+        await stoppable.stop();
+      },
+    );
+  }
+});

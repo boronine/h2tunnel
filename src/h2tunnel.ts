@@ -8,6 +8,7 @@ export const DEFAULT_LISTEN_IP = "::0";
 export const DEFAULT_ORIGIN_HOST = "localhost";
 export const DEFAULT_TUNNEL_RESTART_TIMEOUT = 1000;
 const MUX_SERVER_HOST = "127.0.0.1";
+const NO_DELAY = true;
 
 interface CommonOptions {
   logger?: (line: any) => void;
@@ -210,9 +211,12 @@ export class TunnelServer extends AbstractTunnel<
       // This is necessary only if the client uses a self-signed certificate.
       ca: [options.cert],
     }),
-    readonly proxyServer = net.createServer({ allowHalfOpen: true }),
+    readonly proxyServer = net.createServer({
+      allowHalfOpen: true,
+      noDelay: NO_DELAY,
+    }),
   ) {
-    super(options.logger, net.createServer());
+    super(options.logger, net.createServer({ noDelay: NO_DELAY }));
     proxyServer.on("connection", (socket: net.Socket) => {
       this.addDestroyable(socket);
       if (!this.session || this.session.destroyed || this.aborted) {
@@ -358,6 +362,7 @@ export class TunnelClient extends AbstractTunnel<
       const muxSocket = net.createConnection({
         host: MUX_SERVER_HOST,
         port: this.getMuxServerPort(),
+        noDelay: NO_DELAY,
       });
       this.addDestroyable(muxSocket);
       tunnelSocket.pipe(muxSocket);
