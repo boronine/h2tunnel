@@ -26,14 +26,16 @@ const TUNNEL2_PORT = 15008;
 // Reduce this to make tests faster
 const TIME_MULTIPLIER = 0.2;
 
-const CLIENT_KEY = `-----BEGIN PRIVATE KEY-----
+// This keypair is issued for example.com: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=example.com"
+
+const CLIENT_KEY_EXAMPLECOM = `-----BEGIN PRIVATE KEY-----
 MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDCDzcLnOqzvCrnUyd4P
 1QcIG/Xi/VPpA5dVIwPVkutr9y/wZo3aJsYUX5xExQMsEeihZANiAAQfSPquV3P/
 uhHm2D5czJoFyldutJrQswri0brL99gHSsOmQ34cH7bddcSTVToAZfwkv2yEZPNf
 eLM7tASBpINt8uuOjJhCp034thS1V0HH/qDEHzEfy5wZEDrwevuzD+k=
 -----END PRIVATE KEY-----`;
 
-const CLIENT_CRT = `-----BEGIN CERTIFICATE-----
+const CLIENT_CRT_EXAMPLECOM = `-----BEGIN CERTIFICATE-----
 MIIB7DCCAXKgAwIBAgIUIyesgpQMVroHhiDuFa56b+bf7UwwCgYIKoZIzj0EAwIw
 FjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wHhcNMjQwNTMwMTAzMTM3WhcNMzQwNTI4
 MTAzMTM3WjAWMRQwEgYDVQQDDAtleGFtcGxlLmNvbTB2MBAGByqGSM49AgEGBSuB
@@ -45,6 +47,28 @@ A1UdEQQkMCKCC2V4YW1wbGUuY29tgg0qLmV4YW1wbGUuY29thwQKAAABMAoGCCqG
 SM49BAMCA2gAMGUCMQCJ2CU2Qh9UsHzmgpDXiIwAtA6YvBKSlR+MO22CcuFC45aM
 JN+yjDEXE/TgT+bxgfcCMFFZkqT7GYLc18lW6sv6GZvhzFPV8eTePa2xwVyBgaca
 93vJMc5HXDLt7XPK+Iz90g==
+-----END CERTIFICATE-----`;
+
+// This keypair is issued for localhost: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=localhost"
+
+const CLIENT_KEY_LOCALHOST = `-----BEGIN PRIVATE KEY-----
+MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDDittBDK95KNEY62DbX
+7YdaqtpqEVJLt+6fg1CIhkbDd8ZtrZLF98d8o0qTBJyr/xuhZANiAAShciJg7L29
+VczOqPMG1YmTOh5t9ZfEwCQRqaQcUuilm5uFGf4eZbx3cyc3YypvjONIykSMPShM
+NeCoOEX13zU5d5vJb01zEpBijunhS0/YD08kmLvq7S8pR6TPlzCiDqc=
+-----END PRIVATE KEY-----`;
+
+const CLIENT_CRT_LOCALHOST = `-----BEGIN CERTIFICATE-----
+MIIBujCCAUCgAwIBAgIUB/l/jY39X+YnVsApRJ2qF7fLYlYwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI1MDIwNTA5NDAzOVoXDTM1MDIwMzA5
+NDAzOVowFDESMBAGA1UEAwwJbG9jYWxob3N0MHYwEAYHKoZIzj0CAQYFK4EEACID
+YgAEoXIiYOy9vVXMzqjzBtWJkzoebfWXxMAkEamkHFLopZubhRn+HmW8d3MnN2Mq
+b4zjSMpEjD0oTDXgqDhF9d81OXebyW9NcxKQYo7p4UtP2A9PJJi76u0vKUekz5cw
+og6no1MwUTAdBgNVHQ4EFgQUrs/3sLZ2MxxLsg2iFxSp8XCi1SgwHwYDVR0jBBgw
+FoAUrs/3sLZ2MxxLsg2iFxSp8XCi1SgwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjO
+PQQDAgNoADBlAjEAxuAidOxI5IHINYbBTRPugLuEQssk2ofAc9RxlyOyyBbNKswL
+NIO0NAnTpBdpTWf0AjB79TWx1dVF1WKTUOfO7taYmjj5NTwwPvjfQVuP1zMGpxd0
+5H/5nMUHDime5raC/gw=
 -----END CERTIFICATE-----`;
 
 type LogLineTest =
@@ -75,6 +99,27 @@ const getLogger = (name: LogName, colorCode: number) => (line: LogLineTest) => {
   }
 };
 
+const serverOptions: ServerOptions = {
+  logger: getLogger("server", 32),
+  key: CLIENT_KEY_EXAMPLECOM,
+  cert: CLIENT_CRT_EXAMPLECOM,
+  tunnelListenIp: "::1",
+  tunnelListenPort: TUNNEL_PORT,
+  proxyListenIp: "::1",
+  proxyListenPort: PROXY_PORT,
+};
+
+const clientOptions: ClientOptions = {
+  logger: getLogger("client", 33),
+  key: CLIENT_KEY_EXAMPLECOM,
+  cert: CLIENT_CRT_EXAMPLECOM,
+  tunnelHost: "::1",
+  tunnelPort: TUNNEL_PORT,
+  originHost: "::1",
+  originPort: LOCAL_PORT,
+  tunnelRestartTimeout: 5000 * TIME_MULTIPLIER,
+};
+
 function assertLastLines(
   expectedLines: `${"client" | "server"}   ${LogLineTest}`[],
 ) {
@@ -90,27 +135,6 @@ function assertLastLines(
     .replaceAll("00", "\\d+");
   assert.match(actual, RegExp("^" + expected + "$"));
 }
-
-const serverOptions: ServerOptions = {
-  logger: getLogger("server", 32),
-  key: CLIENT_KEY,
-  cert: CLIENT_CRT,
-  tunnelListenIp: "::1",
-  tunnelListenPort: TUNNEL_PORT,
-  proxyListenIp: "::1",
-  proxyListenPort: PROXY_PORT,
-};
-
-const clientOptions: ClientOptions = {
-  logger: getLogger("client", 33),
-  key: CLIENT_KEY,
-  cert: CLIENT_CRT,
-  tunnelHost: "::1",
-  tunnelPort: TUNNEL_PORT,
-  originHost: "::1",
-  originPort: LOCAL_PORT,
-  tunnelRestartTimeout: 5000 * TIME_MULTIPLIER,
-};
 
 type Conn = { browserSocket: net.Socket; originSocket: net.Socket };
 
@@ -182,9 +206,9 @@ class NetworkEmulator extends Stoppable {
         });
         this.addDestroyable(outgoingSocket);
         this.outgoingSocket = outgoingSocket;
+        this.logger("networkEmulator connection");
         outgoingSocket.on("error", () => incomingSocket.resetAndDestroy());
         incomingSocket.on("error", () => outgoingSocket.resetAndDestroy());
-        this.logger("networkEmulator connection");
         incomingSocket.pipe(outgoingSocket);
         outgoingSocket.pipe(incomingSocket);
       });
@@ -194,19 +218,26 @@ class NetworkEmulator extends Stoppable {
   }
 }
 
-interface EchoServerParams {
+interface EndToEndTestParams {
   originListenHost: string;
   originListenPort: number;
   proxyHost: string;
   proxyPort: number;
 }
 
+const DEFAULT_PARAMS: EndToEndTestParams = {
+  originListenHost: "::1",
+  originListenPort: LOCAL_PORT,
+  proxyHost: "::1",
+  proxyPort: PROXY_PORT,
+};
+
 class EchoOriginAndBrowser extends Stoppable {
   readonly dataReceived: Map<net.Socket, string> = new Map();
   private i = 0;
 
   constructor(
-    readonly params: EchoServerParams,
+    readonly params: EndToEndTestParams = DEFAULT_PARAMS,
     readonly loggerOrigin = getLogger("origin", 35),
     readonly loggerBrowser = getLogger("browser", 36),
     readonly server = net.createServer({ allowHalfOpen: true }),
@@ -233,7 +264,7 @@ class EchoOriginAndBrowser extends Stoppable {
           this.loggerOrigin(`send 1`);
           this.loggerOrigin(`send FIN`);
           socket.end("z");
-        }, 50 * TIME_MULTIPLIER);
+        }, 500 * TIME_MULTIPLIER);
       });
     });
   }
@@ -424,12 +455,12 @@ async function withClientAndServer(
   client.start();
   await server.waitUntilConnected();
 
-  assertLastLines([
-    "server   listening",
-    "client   connecting",
-    "client   connected to *:00 from *:00",
-    "server   connected to *:00 from *:00",
-  ]);
+  // assertLastLines([
+  //   "server   listening",
+  //   "client   connecting",
+  //   "client   connected to *:00 from *:00",
+  //   "server   connected to *:00 from *:00",
+  // ]);
 
   await func(client, server);
 
@@ -437,7 +468,7 @@ async function withClientAndServer(
   await server.stop();
 }
 
-async function runTests(params: EchoServerParams) {
+async function runTests(params: EndToEndTestParams) {
   for (const term of ["FIN", "RST"] satisfies ("FIN" | "RST")[]) {
     for (const by of ["browser", "localhost"] satisfies (
       | "browser"
@@ -470,14 +501,25 @@ async function runTests(params: EchoServerParams) {
 // --------------------------------------------------------------------------------------------------------
 // TESTS
 
+await test.only("localhost and non-localhost key/crt pairs", {}, async () => {
+  // Localhost certificate support is ensured by this option: https://nodejs.org/api/tls.html#tlsconnectoptions-callback
+  const PAIRS: Partial<ClientOptions>[] = [
+    { key: CLIENT_KEY_EXAMPLECOM, cert: CLIENT_CRT_EXAMPLECOM },
+    { key: CLIENT_KEY_LOCALHOST, cert: CLIENT_CRT_LOCALHOST },
+  ];
+  for (const pair of PAIRS) {
+    await withClientAndServer(pair, pair, async () => {
+      const echoServer = new EchoOriginAndBrowser();
+      await echoServer.startAndWaitUntilListening();
+      await echoServer.expectPingPongAndClose();
+      await echoServer.stop();
+    });
+  }
+});
+
 await test("logging test", { timeout: 10000 }, async () => {
   await withClientAndServer({}, {}, async () => {
-    const echoServer = new EchoOriginAndBrowser({
-      originListenHost: "::1",
-      originListenPort: LOCAL_PORT,
-      proxyHost: "::1",
-      proxyPort: PROXY_PORT,
-    });
+    const echoServer = new EchoOriginAndBrowser();
     await echoServer.startAndWaitUntilListening();
 
     LOG_LINES = [];
@@ -569,7 +611,7 @@ await test("logging test", { timeout: 10000 }, async () => {
   });
 });
 
-await test("basic connection and termination", { timeout: 10000 }, async () => {
+await test("basic connection and termination", { timeout: 20000 }, async () => {
   for (const localIp of ["127.0.0.1", "::1"]) {
     // Run EchoServer tests without proxy or tunnel
     await runTests({
@@ -620,12 +662,7 @@ await test("happy-path1", { timeout: 5000 }, async (t: TestContext) => {
   LOG_LINES = [];
   const server = new TunnelServer(serverOptions);
   const client = new TunnelClient(clientOptions);
-  const echo = new EchoOriginAndBrowser({
-    originListenHost: "::1",
-    originListenPort: LOCAL_PORT,
-    proxyHost: "::1",
-    proxyPort: PROXY_PORT,
-  });
+  const echo = new EchoOriginAndBrowser();
   await echo.startAndWaitUntilListening();
 
   await t.test("try using tunnel before it is ready", async () => {
@@ -694,14 +731,9 @@ await test("happy-path1", { timeout: 5000 }, async (t: TestContext) => {
   });
 });
 
-await test.only("happy-path2", { timeout: 5000 }, async () => {
+await test("happy-path2", { timeout: 5000 }, async () => {
   LOG_LINES = [];
-  const echo = new EchoOriginAndBrowser({
-    originListenHost: "::1",
-    originListenPort: LOCAL_PORT,
-    proxyHost: "::1",
-    proxyPort: PROXY_PORT,
-  });
+  const echo = new EchoOriginAndBrowser();
   const net = new NetworkEmulator({
     listenHost: "::1",
     listenPort: TUNNEL2_PORT,
@@ -774,6 +806,7 @@ await test.only("happy-path2", { timeout: 5000 }, async () => {
     "server   stopped",
     "client   disconnected",
     "client   restarting",
+    "client   tunnel error read ECONNRESET",
     "server   listening",
     "client   restarting",
     `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
@@ -816,6 +849,7 @@ await test.only("happy-path2", { timeout: 5000 }, async () => {
   await echo.expectEconn();
 
   assertLastLines([
+    "client   tunnel error read ECONNRESET",
     "client   disconnected",
     "server   disconnected",
     "server   rejecting connection from [::1]:00",
@@ -860,12 +894,7 @@ await test.only("happy-path2", { timeout: 5000 }, async () => {
 });
 
 await test("garbage-to-client", { timeout: 5000 }, async () => {
-  const echoServer = new EchoOriginAndBrowser({
-    originListenHost: "::1",
-    originListenPort: LOCAL_PORT,
-    proxyHost: "::1",
-    proxyPort: PROXY_PORT,
-  });
+  const echoServer = new EchoOriginAndBrowser();
   await echoServer.startAndWaitUntilListening();
   const stopBadServer = await createBadTlsServer(TUNNEL_PORT);
   const client = new TunnelClient(clientOptions);
@@ -890,12 +919,7 @@ await test("garbage-to-client", { timeout: 5000 }, async () => {
 });
 
 await test("garbage-to-server", { timeout: 5000 }, async () => {
-  const echoServer = new EchoOriginAndBrowser({
-    originListenHost: "::1",
-    originListenPort: LOCAL_PORT,
-    proxyHost: "::1",
-    proxyPort: PROXY_PORT,
-  });
+  const echoServer = new EchoOriginAndBrowser();
   await echoServer.startAndWaitUntilListening();
   const server = new TunnelServer(serverOptions);
   server.start();

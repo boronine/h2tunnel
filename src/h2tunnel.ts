@@ -1,20 +1,19 @@
-import net from "node:net";
 import events from "node:events";
-import http2 from "node:http2";
-import tls from "node:tls";
 import stream from "node:stream";
-import { ClientHttp2Stream } from "http2";
-
-export interface CommonOptions {
-  logger?: (line: any) => void;
-  key: string;
-  cert: string;
-}
+import net from "node:net";
+import tls from "node:tls";
+import http2 from "node:http2";
 
 export const DEFAULT_LISTEN_IP = "::0";
 export const DEFAULT_ORIGIN_HOST = "localhost";
 export const DEFAULT_TUNNEL_RESTART_TIMEOUT = 1000;
-export const MUX_SERVER_HOST = "127.0.0.1";
+const MUX_SERVER_HOST = "127.0.0.1";
+
+interface CommonOptions {
+  logger?: (line: any) => void;
+  key: string;
+  cert: string;
+}
 
 export interface ServerOptions extends CommonOptions {
   tunnelListenIp?: string;
@@ -48,7 +47,7 @@ export type LogLine =
   | `rejecting connection from ${string}`
   | `${Stream} ${"send" | "recv"} ${"FIN" | "RST" | number}`
   | `${Stream} closed`
-  | `${Servers | Stream} error ${string}`
+  | `${Servers | Stream | "tunnel"} error ${string}`
   | `${Stream} forwarding to ${string}` // client: local address which we connect to
   | `${Stream} forwarded from ${string}` // server: remote address connecting to proxy server
   | "connecting"
@@ -232,6 +231,9 @@ export class TunnelServer extends AbstractTunnel<
     proxyServer.on("error", (err) =>
       this.log(`proxyServer error ${err.toString()}`),
     );
+    tunnelServer.on("tlsClientError", (err) =>
+      this.log(`tunnel error ${err.message.trim()}`),
+    );
     tunnelServer.on("error", (err) =>
       this.log(`tunnelServer error ${err.toString()}`),
     );
@@ -334,11 +336,12 @@ export class TunnelClient extends AbstractTunnel<
       cert: this.options.cert,
       key: this.options.key,
       ca: [this.options.cert],
-      // Necessary only if the server's cert isn't for "localhost".
       checkServerIdentity: () => undefined,
     });
     this.addDestroyable(tunnelSocket);
-    tunnelSocket.on("error", () => {});
+    tunnelSocket.on("error", (err) =>
+      this.log(`tunnel error ${err.message.trim()}`),
+    );
     tunnelSocket.on("close", () => {
       if (!this.session?.destroyed) {
         this.session?.destroy(new Error());
@@ -373,7 +376,7 @@ export class TunnelClient extends AbstractTunnel<
           `connected to ${formatRemote(tunnelSocket)} from ${formatLocal(tunnelSocket)}`,
         );
         this.connectedEvent.emit("connected");
-        session.on("stream", (stream: ClientHttp2Stream) => {
+        session.on("stream", (stream: http2.ClientHttp2Stream) => {
           this.addDestroyable(stream);
           const socket = net.createConnection({
             host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,

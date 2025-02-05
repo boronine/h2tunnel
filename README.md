@@ -85,6 +85,13 @@ Generate `h2tunnel.key` and `h2tunnel.crt` files using `openssl` command:
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=localhost"
 ```
 
+You can inspect your key and certificate files using these commands:
+
+```bash
+openssl ec -in h2tunnel.key -text -noout
+openssl x509 -in h2tunnel.crt -text -noout
+```
+
 ### Forward localhost:8000 to http://mysite.example.com
 
 On your server (mysite.example.com), we will be listening for tunnel connections on port 15001, and providing an HTTP
