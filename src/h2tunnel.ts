@@ -7,7 +7,6 @@ import http2 from "node:http2";
 export const DEFAULT_LISTEN_IP = "::0";
 export const DEFAULT_ORIGIN_HOST = "localhost";
 export const DEFAULT_TUNNEL_RESTART_TIMEOUT = 1000;
-const MUX_SERVER_HOST = "127.0.0.1";
 
 interface CommonOptions {
   logger?: (line: any) => void;
@@ -104,8 +103,8 @@ export abstract class AbstractTunnel<
   S extends http2.Http2Session,
   M extends net.Server,
 > extends Stoppable {
-  // Due to Node.js bug, we have seen HTTP2 sessions that were destroyed before "close" event was emitted, so we always have to check for "destroyed"
-  session: S | null = null;
+  activeSession: S | null = null;
+  tunnelSocket: tls.TLSSocket | null = null;
   activeStreams: Map<http2.Http2Stream, net.Socket> = new Map();
   aborted: boolean = false;
   connectedEvent = new events.EventEmitter<Record<"connected", []>>();
@@ -121,15 +120,8 @@ export abstract class AbstractTunnel<
     );
   }
 
-  getMuxServerPort(): number {
-    return (this.muxServer.address() as net.AddressInfo).port;
-  }
-
-  addStream(
-    streamId: number,
-    socket: net.Socket,
-    stream: http2.Http2Stream,
-  ): void {
+  addStream(socket: net.Socket, stream: http2.Http2Stream): number {
+    const streamId = this.activeStreams.size;
     this.activeStreams.set(stream, socket);
     // Error can be on the socket side or on the stream side. Socket error is logged as error, stream error is logged as RST
     socket.on("error", (error) => {
@@ -171,12 +163,13 @@ export abstract class AbstractTunnel<
 
     setup(socket, stream, "send", () => stream.destroy(new Error()));
     setup(stream, socket, "recv", () => socket.resetAndDestroy());
+    return streamId;
   }
 
   start() {
     this.aborted = false;
     this.addCloseable(this.muxServer);
-    this.muxServer.listen(0, MUX_SERVER_HOST); // Let the OS pick a port
+    this.muxServer.listen(0); // Let the OS pick a port
   }
 
   async stop() {
@@ -187,7 +180,7 @@ export abstract class AbstractTunnel<
   }
 
   async waitUntilConnected() {
-    if (!this.session || this.session.destroyed) {
+    if (!this.activeSession || this.activeSession.destroyed) {
       await new Promise<void>((resolve) =>
         this.connectedEvent.once("connected", resolve),
       );
@@ -215,17 +208,16 @@ export class TunnelServer extends AbstractTunnel<
     super(options.logger, net.createServer());
     proxyServer.on("connection", (socket: net.Socket) => {
       this.addDestroyable(socket);
-      if (!this.session || this.session.destroyed || this.aborted) {
+      if (!this.activeSession || this.activeSession.destroyed || this.aborted) {
         this.log(`rejecting connection from ${formatRemote(socket)}`);
         socket.resetAndDestroy();
       } else {
-        const streamId = this.activeStreams.size;
-        this.log(`stream${streamId} forwarded from ${formatRemote(socket)}`);
-        const session = this.session.request({
+        const stream = this.activeSession.request({
           [http2.constants.HTTP2_HEADER_METHOD]: "POST",
         });
-        this.addDestroyable(session);
-        this.addStream(streamId, socket, session);
+        this.addDestroyable(stream);
+        const streamId = this.addStream(socket, stream);
+        this.log(`stream${streamId} forwarded from ${formatRemote(socket)}`);
       }
     });
     proxyServer.on("error", (err) =>
@@ -238,31 +230,33 @@ export class TunnelServer extends AbstractTunnel<
       this.log(`tunnelServer error ${err.toString()}`),
     );
     tunnelServer.on("secureConnection", (tunnelSocket: tls.TLSSocket) => {
+      // Make sure latest tunnel kills previous tunnel
+      this.tunnelSocket?.destroy();
+      this.tunnelSocket = tunnelSocket;
       this.addDestroyable(tunnelSocket);
       tunnelSocket.on("error", () => {});
-      tunnelSocket.on("close", () => this.session?.destroy(new Error()));
-      // TODO: make sure latest tunnel kills previous tunnel
-      const session: http2.ClientHttp2Session = http2.connect(
-        `http://${MUX_SERVER_HOST}:${this.getMuxServerPort()}`,
-      );
-      this.addDestroyable(session);
-      session.on("close", () => {
-        tunnelSocket.destroy();
+      tunnelSocket.on("close", () => {
+        session.destroy(new Error());
         this.log(`disconnected`);
       });
+      const address = this.muxServer.address() as net.AddressInfo;
+      const session: http2.ClientHttp2Session = http2.connect(
+        `http://${formatAddr(address.family, address.address, address.port)}`,
+      );
+      this.addDestroyable(session);
       session.on("error", () => {});
-      session.on("connect", () => {
-        this.session = session;
+      this.muxServer.once("connection", (muxSocket: net.Socket) => {
+        this.addDestroyable(muxSocket);
+        tunnelSocket.on("close", () => muxSocket.destroy());
+        tunnelSocket.pipe(muxSocket);
+        muxSocket.pipe(tunnelSocket);
+      });
+      session.on(`remoteSettings`, () => {
+        this.activeSession = session;
         this.log(
           `connected to ${formatLocal(tunnelSocket)} from ${formatRemote(tunnelSocket)}`,
         );
         this.connectedEvent.emit("connected");
-      });
-      this.muxServer.once("connection", (muxSocket: net.Socket) => {
-        this.addDestroyable(muxSocket);
-        session.on("close", () => muxSocket.destroy());
-        tunnelSocket.pipe(muxSocket);
-        muxSocket.pipe(tunnelSocket);
       });
     });
   }
@@ -319,6 +313,20 @@ export class TunnelClient extends AbstractTunnel<
   constructor(readonly options: ClientOptions) {
     super(options.logger, http2.createServer());
     this.muxServer.on("listening", () => this.startTunnel());
+    this.muxServer.on("stream", (stream: http2.ClientHttp2Stream) => {
+      this.addDestroyable(stream);
+      const socket = net.createConnection({
+        host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,
+        port: this.options.originPort,
+        allowHalfOpen: true,
+      });
+      this.addDestroyable(socket);
+      const streamId = this.addStream(socket, stream);
+      // Wait for connection so we know the local port
+      socket.on("connect", () =>
+        this.log(`stream${streamId} forwarding to ${formatLocal(socket)}`),
+      );
+    });
   }
 
   start() {
@@ -338,14 +346,21 @@ export class TunnelClient extends AbstractTunnel<
       ca: [this.options.cert],
       checkServerIdentity: () => undefined,
     });
+    this.tunnelSocket = tunnelSocket;
+    const address = this.muxServer.address() as net.AddressInfo;
+    const muxSocket = net.createConnection({
+      port: address.port,
+      host: address.address,
+      family: Number(address.family.charAt(3)),
+    });
     this.addDestroyable(tunnelSocket);
-    tunnelSocket.on("error", (err) =>
-      this.log(`tunnel error ${err.message.trim()}`),
-    );
+    this.addDestroyable(muxSocket);
+    tunnelSocket.pipe(muxSocket);
+    muxSocket.pipe(tunnelSocket);
+    tunnelSocket.on("error", () => {});
     tunnelSocket.on("close", () => {
-      if (!this.session?.destroyed) {
-        this.session?.destroy(new Error());
-      }
+      this.log(`disconnected`);
+      muxSocket.destroy();
       if (!this.aborted) {
         this.restartTimeout = this.setTimeout(() => {
           this.log("restarting");
@@ -353,43 +368,15 @@ export class TunnelClient extends AbstractTunnel<
         }, this.options.tunnelRestartTimeout ?? DEFAULT_TUNNEL_RESTART_TIMEOUT);
       }
     });
-    tunnelSocket.on("secureConnect", () => {
-      // We don't have to wait for muxSocket to connect before we can start using it
-      const muxSocket = net.createConnection({
-        host: MUX_SERVER_HOST,
-        port: this.getMuxServerPort(),
-      });
-      this.addDestroyable(muxSocket);
-      tunnelSocket.pipe(muxSocket);
-      muxSocket.pipe(tunnelSocket);
-
-      this.muxServer.once("session", (session: http2.ServerHttp2Session) => {
-        this.addDestroyable(session);
-        session.on("close", () => {
-          tunnelSocket.destroy();
-          muxSocket.destroy();
-          this.log(`disconnected`);
-        });
-        session.on("error", () => {});
-        this.session = session;
+    this.muxServer.once("session", (session: http2.ServerHttp2Session) => {
+      this.addDestroyable(session);
+      session.on("error", () => {});
+      tunnelSocket.on("close", () => session.destroy(new Error()));
+      session.on("remoteSettings", () => {
         this.log(
           `connected to ${formatRemote(tunnelSocket)} from ${formatLocal(tunnelSocket)}`,
         );
         this.connectedEvent.emit("connected");
-        session.on("stream", (stream: http2.ClientHttp2Stream) => {
-          this.addDestroyable(stream);
-          const socket = net.createConnection({
-            host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,
-            port: this.options.originPort,
-            allowHalfOpen: true,
-          });
-          this.addDestroyable(socket);
-          socket.on("connect", () => {
-            const streamId = this.activeStreams.size;
-            this.log(`stream${streamId} forwarding to ${formatLocal(socket)}`);
-            this.addStream(streamId, socket, stream);
-          });
-        });
       });
     });
   }

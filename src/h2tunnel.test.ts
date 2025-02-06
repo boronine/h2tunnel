@@ -1,4 +1,4 @@
-import { test, TestContext } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert";
 import net from "node:net";
 import {
@@ -24,7 +24,7 @@ const TUNNEL_PORT = 15005;
 const TUNNEL2_PORT = 15008;
 
 // Reduce this to make tests faster
-const TIME_MULTIPLIER = 0.2;
+const TIME_MULTIPLIER = 0.1;
 
 // This keypair is issued for example.com: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=example.com"
 
@@ -74,11 +74,9 @@ NIO0NAnTpBdpTWf0AjB79TWx1dVF1WKTUOfO7taYmjj5NTwwPvjfQVuP1zMGpxd0
 type LogLineTest =
   | LogLine
   | "sending garbage"
-  | "networkEmulator connection"
-  | "localhost connection"
+  | "connection"
   | `${"recv" | "send"} ${number | "FIN"}`
   | `listening on ${number}`
-  | "connecting"
   | "send RST"
   | `error ${string}`;
 
@@ -86,20 +84,37 @@ let LOG_LINES: string[] = [];
 
 type LogName =
   | "client"
+  | "client1"
+  | "client2"
   | "server"
   | "bad-tls"
   | "network"
   | "origin"
   | "browser";
 
+function logPos() {
+  try {
+    throw new Error();
+  } catch (e) {
+    const line: string = e.stack.trim().split("\n")[2];
+    const pos = line.match(/\((.*)\)/);
+    console.log(pos?.[1]);
+  }
+}
+
 const getLogger = (name: LogName, colorCode: number) => (line: LogLineTest) => {
   process.stdout.write(`${name.padEnd(10)} \x1b[${colorCode}m${line}\x1b[0m\n`);
-  if (name === "client" || name === "server") {
+  if (
+    name === "client" ||
+    name === "client1" ||
+    name === "client2" ||
+    name === "server"
+  ) {
     LOG_LINES.push(`${name}   ${line}`);
   }
 };
 
-const serverOptions: ServerOptions = {
+const DEFAULT_SERVER_OPTIONS: ServerOptions = {
   logger: getLogger("server", 32),
   key: CLIENT_KEY_EXAMPLECOM,
   cert: CLIENT_CRT_EXAMPLECOM,
@@ -109,7 +124,7 @@ const serverOptions: ServerOptions = {
   proxyListenPort: PROXY_PORT,
 };
 
-const clientOptions: ClientOptions = {
+const DEFAULT_CLIENT_OPTIONS: ClientOptions = {
   logger: getLogger("client", 33),
   key: CLIENT_KEY_EXAMPLECOM,
   cert: CLIENT_CRT_EXAMPLECOM,
@@ -120,9 +135,7 @@ const clientOptions: ClientOptions = {
   tunnelRestartTimeout: 5000 * TIME_MULTIPLIER,
 };
 
-function assertLastLines(
-  expectedLines: `${"client" | "server"}   ${LogLineTest}`[],
-) {
+function assertLastLines(expectedLines: `${LogName}   ${LogLineTest}`[]) {
   // get last lines
   const actual = LOG_LINES.join("\n");
   LOG_LINES = [];
@@ -206,7 +219,7 @@ class NetworkEmulator extends Stoppable {
         });
         this.addDestroyable(outgoingSocket);
         this.outgoingSocket = outgoingSocket;
-        this.logger("networkEmulator connection");
+        this.logger("connection");
         outgoingSocket.on("error", () => incomingSocket.resetAndDestroy());
         incomingSocket.on("error", () => outgoingSocket.resetAndDestroy());
         incomingSocket.pipe(outgoingSocket);
@@ -232,9 +245,13 @@ const DEFAULT_PARAMS: EndToEndTestParams = {
   proxyPort: PROXY_PORT,
 };
 
+/**
+ * To avoid confusion, instead of calling these client and server, we call these "origin" and "browser"
+ */
 class EchoOriginAndBrowser extends Stoppable {
-  readonly dataReceived: Map<net.Socket, string> = new Map();
-  private i = 0;
+  // ID is first byte that is sent by the browser
+  readonly originSocketByID: Map<string, net.Socket> = new Map();
+  readonly browserSockets: Set<net.Socket> = new Set();
 
   constructor(
     readonly params: EndToEndTestParams = DEFAULT_PARAMS,
@@ -245,42 +262,30 @@ class EchoOriginAndBrowser extends Stoppable {
     super();
     this.server.on("connection", (socket) => {
       this.addDestroyable(socket);
-      loggerOrigin("localhost connection");
+      loggerOrigin("connection");
       socket.on("error", (err) => {
         loggerOrigin(`error ${err.toString()}`);
       });
+      socket.once("data", (data) => {
+        this.originSocketByID.set(data.toString("utf-8").charAt(0), socket);
+      });
       socket.on("data", (data) => {
         this.loggerOrigin(`recv ${data.length}`);
-        this.appendData(socket, data);
         if (!socket.writableEnded) {
           this.loggerOrigin(`send ${data.length}`);
           socket.write(data);
         }
       });
       // Make sure other end stays half-open long enough to receive the last byte
-      socket.on("end", async () => {
-        loggerOrigin("recv FIN");
+      socket.on("end", () => {
+        this.loggerOrigin("recv FIN");
         this.setTimeout(() => {
           this.loggerOrigin(`send 1`);
           this.loggerOrigin(`send FIN`);
           socket.end("z");
-        }, 500 * TIME_MULTIPLIER);
+        }, 100 * TIME_MULTIPLIER);
       });
     });
-  }
-
-  appendData(socket: net.Socket, data: Buffer): void {
-    const previousData = this.dataReceived.get(socket) ?? "";
-    this.dataReceived.set(socket, previousData + data.toString("utf-8"));
-  }
-
-  getSocketByPrefix(prefix: string): net.Socket {
-    for (const [socket, data] of this.dataReceived) {
-      if (data.startsWith(prefix)) {
-        return socket;
-      }
-    }
-    throw new Error(`Socket not found: ${prefix}`);
   }
 
   async startAndWaitUntilListening() {
@@ -294,32 +299,38 @@ class EchoOriginAndBrowser extends Stoppable {
     );
   }
 
-  createClientSocket(): net.Socket {
+  createBrowserSocket(): net.Socket {
     this.loggerBrowser("connecting");
     const socket = net.createConnection({
       host: this.params.proxyHost,
       port: this.params.proxyPort,
       allowHalfOpen: true,
     });
+    this.browserSockets.add(socket);
     this.addDestroyable(socket);
-    socket.on("data", (chunk) => this.appendData(socket, chunk));
     // Make sure other end stays half-open long enough to receive the last byte
     socket.on("end", () => {
-      this.setTimeout(() => socket.end("z"), 100 * TIME_MULTIPLIER);
+      this.loggerBrowser("recv FIN");
+      this.setTimeout(() => {
+        this.loggerBrowser(`send 1`);
+        this.loggerBrowser(`send FIN`);
+        socket.end("z");
+      }, 100 * TIME_MULTIPLIER);
     });
+    socket.on("close", () => this.browserSockets.delete(socket));
     return socket;
   }
 
   async expectEconn() {
     return new Promise<void>((resolve, reject) => {
-      const socket = this.createClientSocket();
+      const socket = this.createBrowserSocket();
       socket.on("error", () => {});
       socket.on("close", (hadError) => {
         if (hadError) {
           this.loggerBrowser(`error ${socket.errored}`);
           resolve();
         } else {
-          reject(new Error("Unexcpected success"));
+          reject(new Error("Unexpected success"));
         }
       });
     });
@@ -332,20 +343,24 @@ class EchoOriginAndBrowser extends Stoppable {
   }
 
   async createConn(): Promise<Conn> {
-    const browserSocket = this.createClientSocket();
-    const id = (this.i++).toString();
+    const browserSocket = this.createBrowserSocket();
+    const curConnectionId = this.browserSockets.size.toString();
     await new Promise<void>((resolve) => browserSocket.on("connect", resolve));
     // Send ID byte and wait for it to come back
-    await new Promise<void>((resolve) => {
-      browserSocket.once("data", (chunk) => {
-        assert.strictEqual(chunk.toString(), id);
-        resolve();
-      });
-      browserSocket.write(id);
-    });
+    await sleep(50);
+    browserSocket.write(curConnectionId);
+    const chunk = await new Promise<Buffer>((resolve) =>
+      browserSocket.once("data", resolve),
+    );
+    assert.strictEqual(chunk.toString(), curConnectionId);
     await sleep(100);
-    const originSocket = this.getSocketByPrefix(id);
-    return { browserSocket, originSocket };
+    for (const [connectionId, originSocket] of this.originSocketByID) {
+      if (connectionId === curConnectionId) {
+        this.originSocketByID.delete(connectionId);
+        return { browserSocket, originSocket };
+      }
+    }
+    throw new Error(`Socket not found`);
   }
 
   async testConn(
@@ -374,6 +389,10 @@ class EchoOriginAndBrowser extends Stoppable {
         : [conn.originSocket, conn.browserSocket];
 
     if (term === "FIN") {
+      let socket1data = "";
+      let socket2data = "";
+      socket1.on("data", (data) => (socket1data += data.toString()));
+      socket2.on("data", (data) => (socket2data += data.toString()));
       assert.strictEqual(socket2.readyState, "open");
       assert.strictEqual(socket1.readyState, "open");
       socket1.end();
@@ -406,8 +425,6 @@ class EchoOriginAndBrowser extends Stoppable {
           });
         }),
       ]);
-      const socket1data = this.dataReceived.get(socket1);
-      const socket2data = this.dataReceived.get(socket2);
       // Make sure last byte was successfully communicated in half-open state
       assert.strictEqual(socket1data, socket2data + "z");
     } else if (term == "RST") {
@@ -448,12 +465,19 @@ async function withClientAndServer(
   func: (client: TunnelClient, server: TunnelServer) => Promise<void>,
 ) {
   LOG_LINES = [];
-  const server = new TunnelServer({ ...serverOptions, ...serverOverrides });
+  const server = new TunnelServer({
+    ...DEFAULT_SERVER_OPTIONS,
+    ...serverOverrides,
+  });
   server.start();
   await server.waitUntilListening();
-  const client = new TunnelClient({ ...clientOptions, ...clientOverrides });
+  const client = new TunnelClient({
+    ...DEFAULT_CLIENT_OPTIONS,
+    ...clientOverrides,
+  });
   client.start();
   await server.waitUntilConnected();
+  await client.waitUntilConnected();
 
   // assertLastLines([
   //   "server   listening",
@@ -468,7 +492,9 @@ async function withClientAndServer(
   await server.stop();
 }
 
-async function runTests(params: EndToEndTestParams) {
+async function testHalfClosed(params: EndToEndTestParams) {
+  const echo = new EchoOriginAndBrowser(params);
+  await echo.startAndWaitUntilListening();
   for (const term of ["FIN", "RST"] satisfies ("FIN" | "RST")[]) {
     for (const by of ["browser", "localhost"] satisfies (
       | "browser"
@@ -477,31 +503,30 @@ async function runTests(params: EndToEndTestParams) {
       console.log(
         `clean termination by ${by} ${term} on ${params.proxyHost}:${params.proxyPort}`,
       );
-      const echoServer = new EchoOriginAndBrowser(params);
-      await echoServer.startAndWaitUntilListening();
+
       // Test single
-      await echoServer.testConn(1, term, by, 0);
-      await echoServer.testConn(4, term, by, 0);
+      await echo.testConn(1, term, by, 0);
+      await echo.testConn(4, term, by, 0);
       // Test double simultaneous
       await Promise.all([
-        echoServer.testConn(3, term, by, 0),
-        echoServer.testConn(3, term, by, 0),
+        echo.testConn(3, term, by, 0),
+        echo.testConn(3, term, by, 0),
       ]);
       // Test triple delayed
       await Promise.all([
-        echoServer.testConn(4, term, by, 0),
-        echoServer.testConn(4, term, by, 10),
-        echoServer.testConn(4, term, by, 100),
+        echo.testConn(4, term, by, 0),
+        echo.testConn(4, term, by, 10),
+        echo.testConn(4, term, by, 100),
       ]);
-      await echoServer.stop();
     }
   }
+  await echo.stop();
 }
 
 // --------------------------------------------------------------------------------------------------------
 // TESTS
 
-await test.only("localhost and non-localhost key/crt pairs", {}, async () => {
+await test("localhost and non-localhost key/crt pairs", {}, async () => {
   // Localhost certificate support is ensured by this option: https://nodejs.org/api/tls.html#tlsconnectoptions-callback
   const PAIRS: Partial<ClientOptions>[] = [
     { key: CLIENT_KEY_EXAMPLECOM, cert: CLIENT_CRT_EXAMPLECOM },
@@ -509,26 +534,26 @@ await test.only("localhost and non-localhost key/crt pairs", {}, async () => {
   ];
   for (const pair of PAIRS) {
     await withClientAndServer(pair, pair, async () => {
-      const echoServer = new EchoOriginAndBrowser();
-      await echoServer.startAndWaitUntilListening();
-      await echoServer.expectPingPongAndClose();
-      await echoServer.stop();
+      const echo = new EchoOriginAndBrowser();
+      await echo.startAndWaitUntilListening();
+      await echo.expectPingPongAndClose();
+      await echo.stop();
     });
   }
 });
 
 await test("logging test", { timeout: 10000 }, async () => {
   await withClientAndServer({}, {}, async () => {
-    const echoServer = new EchoOriginAndBrowser();
-    await echoServer.startAndWaitUntilListening();
+    const echo = new EchoOriginAndBrowser();
+    await echo.startAndWaitUntilListening();
 
     LOG_LINES = [];
-    await echoServer.testConn(0, "FIN", "browser", 0);
+    await echo.testConn(0, "FIN", "browser", 0);
     assertLastLines([
       "server   stream0 forwarded from [::1]:00",
+      "client   stream0 forwarding to [::1]:00",
       // Browser sends ID byte
       "server   stream0 send 1",
-      "client   stream0 forwarding to [::1]:00",
       "client   stream0 recv 1",
       // Localhost sends ID byte back
       "client   stream0 send 1",
@@ -546,12 +571,12 @@ await test("logging test", { timeout: 10000 }, async () => {
       "server   stream0 closed",
     ]);
 
-    await echoServer.testConn(0, "FIN", "localhost", 0);
+    await echo.testConn(0, "FIN", "localhost", 0);
     assertLastLines([
       "server   stream0 forwarded from [::1]:00",
+      "client   stream0 forwarding to [::1]:00",
       // Browser sends ID byte
       "server   stream0 send 1",
-      "client   stream0 forwarding to [::1]:00",
       "client   stream0 recv 1",
       // Localhost sends ID byte back
       "client   stream0 send 1",
@@ -569,12 +594,12 @@ await test("logging test", { timeout: 10000 }, async () => {
       "client   stream0 closed",
     ]);
 
-    await echoServer.testConn(0, "RST", "browser", 0);
+    await echo.testConn(0, "RST", "browser", 0);
     assertLastLines([
       "server   stream0 forwarded from [::1]:00",
+      "client   stream0 forwarding to [::1]:00",
       // Browser sends ID byte
       "server   stream0 send 1",
-      "client   stream0 forwarding to [::1]:00",
       "client   stream0 recv 1",
       // Localhost sends ID byte back
       "client   stream0 send 1",
@@ -588,12 +613,12 @@ await test("logging test", { timeout: 10000 }, async () => {
       "client   stream0 closed",
     ]);
 
-    await echoServer.testConn(0, "RST", "localhost", 0);
+    await echo.testConn(0, "RST", "localhost", 0);
     assertLastLines([
       "server   stream0 forwarded from [::1]:00",
+      "client   stream0 forwarding to [::1]:00",
       // Browser sends ID byte
       "server   stream0 send 1",
-      "client   stream0 forwarding to [::1]:00",
       "client   stream0 recv 1",
       // Localhost sends ID byte back
       "client   stream0 send 1",
@@ -607,14 +632,14 @@ await test("logging test", { timeout: 10000 }, async () => {
       "server   stream0 closed",
     ]);
 
-    await echoServer.stop();
+    await echo.stop();
   });
 });
 
-await test("basic connection and termination", { timeout: 20000 }, async () => {
+await test("test-testing-utils", { timeout: 10000 }, async () => {
   for (const localIp of ["127.0.0.1", "::1"]) {
     // Run EchoServer tests without proxy or tunnel
-    await runTests({
+    await testHalfClosed({
       originListenHost: localIp,
       originListenPort: LOCAL_PORT,
       proxyHost: localIp,
@@ -629,14 +654,18 @@ await test("basic connection and termination", { timeout: 20000 }, async () => {
       forwardPort: LOCAL_PORT,
     });
     await net.startAndWaitUntilReady();
-    await runTests({
+    await testHalfClosed({
       originListenHost: localIp,
       originListenPort: LOCAL_PORT,
       proxyHost: localIp,
       proxyPort: LOCAL2_PORT,
     });
     await net.stop();
+  }
+});
 
+await test("test-half-closed", { timeout: 20000 }, async () => {
+  for (const localIp of ["127.0.0.1", "::1"]) {
     // Test EchoServer through default tunnel
     await withClientAndServer(
       {
@@ -648,7 +677,7 @@ await test("basic connection and termination", { timeout: 20000 }, async () => {
         proxyListenIp: localIp,
       },
       () =>
-        runTests({
+        testHalfClosed({
           originListenHost: localIp,
           originListenPort: LOCAL_PORT,
           proxyHost: localIp,
@@ -658,49 +687,20 @@ await test("basic connection and termination", { timeout: 20000 }, async () => {
   }
 });
 
-await test("happy-path1", { timeout: 5000 }, async (t: TestContext) => {
-  LOG_LINES = [];
-  const server = new TunnelServer(serverOptions);
-  const client = new TunnelClient(clientOptions);
-  const echo = new EchoOriginAndBrowser();
-  await echo.startAndWaitUntilListening();
+await test("happy-path", { timeout: 5000 }, () =>
+  withClientAndServer({}, {}, async (client, server) => {
+    const echo = new EchoOriginAndBrowser();
+    await echo.startAndWaitUntilListening();
 
-  await t.test("try using tunnel before it is ready", async () => {
-    server.start();
+    LOG_LINES = [];
 
-    // Make a request before server is listening
-    await echo.expectEconn();
-
-    assertLastLines([
-      "server   listening",
-      "server   rejecting connection from [::1]:00",
-    ]);
-
-    await server.waitUntilListening();
-    client.start();
-
-    // Make a request after server is listening but before tunnel is established
-    await echo.expectEconn();
-
-    await client.waitUntilConnected();
-    await server.waitUntilConnected();
-
-    assertLastLines([
-      "client   connecting",
-      "server   rejecting connection from [::1]:00",
-      `client   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-      `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-    ]);
-  });
-
-  await t.test("send data back and forth", async () => {
     // Make one request
     await echo.expectPingPongAndClose();
 
     assertLastLines([
       "server   stream0 forwarded from [::1]:00",
-      "server   stream0 send 1",
       "client   stream0 forwarding to [::1]:00",
+      "server   stream0 send 1",
       "client   stream0 recv 1",
       "client   stream0 send 1",
       "server   stream0 recv 1",
@@ -714,24 +714,138 @@ await test("happy-path1", { timeout: 5000 }, async (t: TestContext) => {
       "server   stream0 closed",
     ]);
 
+    // Make two simultaneous slow requests
+    await Promise.all([
+      echo.expectPingPongAndClose(),
+      sleep(10).then(() => echo.expectPingPongAndClose()),
+    ]);
+
+    // NOTE: Log lines are unreliable here
+    LOG_LINES = [];
+
     await echo.stop();
     await client.stop();
     await sleep(50);
 
     assertLastLines([
       "client   stopping",
+      "server   disconnected",
       "client   disconnected",
       "client   stopped",
-      "server   disconnected",
     ]);
 
     await server.stop();
 
     assertLastLines(["server   stopping", "server   stopped"]);
-  });
+  }),
+);
+
+await test("use-before-ready", async () => {
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+  const client = new TunnelClient(DEFAULT_CLIENT_OPTIONS);
+  const echo = new EchoOriginAndBrowser();
+  await echo.startAndWaitUntilListening();
+
+  LOG_LINES = [];
+  server.start();
+
+  // Make a request before server is listening
+  await echo.expectEconn();
+
+  assertLastLines([
+    "server   listening",
+    "server   rejecting connection from [::1]:00",
+  ]);
+
+  await server.waitUntilListening();
+  client.start();
+
+  // Make a request after server is listening but before tunnel is established
+  await echo.expectEconn();
+
+  await client.waitUntilConnected();
+  await server.waitUntilConnected();
+
+  assertLastLines([
+    "client   connecting",
+    "server   rejecting connection from [::1]:00",
+    `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    `client   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+  ]);
+
+  await echo.stop();
+  await client.stop();
+  await server.stop();
 });
 
-await test("happy-path2", { timeout: 5000 }, async () => {
+await test("restart-client-while-server-running", { timeout: 5000 }, () =>
+  withClientAndServer({}, {}, async (client, server) => {
+    const echo = new EchoOriginAndBrowser();
+    await echo.startAndWaitUntilListening();
+    LOG_LINES = [];
+    // Restart server while client is running
+    await server.stop();
+    await echo.expectEconn();
+    await sleep(1000);
+    server.start();
+    await server.waitUntilConnected();
+    await client.waitUntilConnected();
+
+    assertLastLines([
+      "server   stopping",
+      "server   disconnected",
+      "server   stopped",
+      // "client   tunnel error This socket has been ended by the other party",
+      "client   disconnected",
+      "server   listening",
+      "client   restarting",
+      `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+      `client   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    ]);
+
+    // Make sure client reconnected and request succeeds
+    console.log(1);
+    await echo.expectPingPongAndClose();
+    console.log(2);
+    await echo.stop();
+    console.log(3);
+  }),
+);
+
+await test("restart-server-while-client-running", { timeout: 5000 }, () =>
+  withClientAndServer({}, {}, async (client, server) => {
+    const echo = new EchoOriginAndBrowser();
+    await echo.startAndWaitUntilListening();
+    LOG_LINES = [];
+
+    await client.stop();
+    client.start();
+
+    await sleep(10);
+
+    // Wait until client reconnected and make a request
+    await echo.expectEconn();
+    await server.waitUntilConnected();
+    await client.waitUntilConnected();
+
+    assertLastLines([
+      "client   stopping",
+      "client   disconnected",
+      "client   stopped",
+      "client   connecting",
+      "server   disconnected",
+      "server   rejecting connection from [::1]:00",
+      `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+      `client   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    ]);
+
+    // Make sure client reconnected and request succeeds
+    await echo.expectPingPongAndClose();
+    await echo.stop();
+  }),
+);
+
+await test("bad-network", { timeout: 5000 }, async () => {
   LOG_LINES = [];
   const echo = new EchoOriginAndBrowser();
   const net = new NetworkEmulator({
@@ -740,9 +854,9 @@ await test("happy-path2", { timeout: 5000 }, async () => {
     forwardHost: "::1",
     forwardPort: TUNNEL_PORT,
   });
-  const server = new TunnelServer(serverOptions);
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
   const client = new TunnelClient({
-    ...clientOptions,
+    ...DEFAULT_CLIENT_OPTIONS,
     tunnelPort: TUNNEL2_PORT,
   });
 
@@ -760,8 +874,8 @@ await test("happy-path2", { timeout: 5000 }, async () => {
   assertLastLines([
     "server   listening",
     "client   connecting",
-    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
     `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
   ]);
 
   // Make one request
@@ -769,8 +883,8 @@ await test("happy-path2", { timeout: 5000 }, async () => {
 
   assertLastLines([
     "server   stream0 forwarded from [::1]:00",
-    "server   stream0 send 1",
     "client   stream0 forwarding to [::1]:00",
+    "server   stream0 send 1",
     "client   stream0 recv 1",
     "client   stream0 send 1",
     "server   stream0 recv 1",
@@ -784,72 +898,14 @@ await test("happy-path2", { timeout: 5000 }, async () => {
     "server   stream0 closed",
   ]);
 
-  // Make two simultaneous slow requests
-  await Promise.all([
-    echo.expectPingPongAndClose(),
-    sleep(10).then(() => echo.expectPingPongAndClose()),
-  ]);
-
-  // NOTE: Log lines are unreliable here
-  LOG_LINES = [];
-
-  // Restart server while client is running
-  await server.stop();
-  await echo.expectEconn();
-  await sleep(6000);
-  server.start();
-  await server.waitUntilConnected();
-
-  assertLastLines([
-    "server   stopping",
-    "server   disconnected",
-    "server   stopped",
-    "client   disconnected",
-    "client   restarting",
-    "client   tunnel error read ECONNRESET",
-    "server   listening",
-    "client   restarting",
-    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
-    `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-  ]);
-
-  // Make sure client reconnected and request succeeds
-  await echo.expectPingPongAndClose();
-  LOG_LINES = [];
-
-  // Restart client while server is running
-  await client.stop();
-  client.start();
-
-  // Wait until client reconnected and make a request
-  await echo.expectEconn();
-  await server.waitUntilConnected();
-
-  assertLastLines([
-    "client   stopping",
-    "client   disconnected",
-    "client   stopped",
-    "client   connecting",
-    "server   stream0 forwarded from [::1]:00",
-    "server   stream0 recv RST",
-    "server   stream0 closed",
-    "server   disconnected",
-    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
-    `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-  ]);
-
-  await echo.expectPingPongAndClose();
-
-  LOG_LINES = [];
-
   // Break tunnel while no requests are taking place
   net.incomingSocket!.resetAndDestroy();
+  await sleep(100);
   net.outgoingSocket!.resetAndDestroy();
   await sleep(100);
   await echo.expectEconn();
 
   assertLastLines([
-    "client   tunnel error read ECONNRESET",
     "client   disconnected",
     "server   disconnected",
     "server   rejecting connection from [::1]:00",
@@ -861,11 +917,11 @@ await test("happy-path2", { timeout: 5000 }, async () => {
 
   assertLastLines([
     "client   restarting",
-    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
     `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
     "server   stream0 forwarded from [::1]:00",
-    "server   stream0 send 1",
+    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
     "client   stream0 forwarding to [::1]:00",
+    "server   stream0 send 1",
     "client   stream0 recv 1",
     "client   stream0 send 1",
     "server   stream0 recv 1",
@@ -897,17 +953,17 @@ await test("garbage-to-client", { timeout: 5000 }, async () => {
   const echoServer = new EchoOriginAndBrowser();
   await echoServer.startAndWaitUntilListening();
   const stopBadServer = await createBadTlsServer(TUNNEL_PORT);
-  const client = new TunnelClient(clientOptions);
+  const client = new TunnelClient(DEFAULT_CLIENT_OPTIONS);
   client.start();
 
   // Still no connection after a second
   await sleep(1000);
   await echoServer.expectEconn();
-  assert.strictEqual(client.session, null);
+  assert.strictEqual(client.activeSession, null);
 
   // Let the network recover and make a successful connection
   await stopBadServer();
-  const server = new TunnelServer(serverOptions);
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
   server.start();
 
   await server.waitUntilConnected();
@@ -921,7 +977,7 @@ await test("garbage-to-client", { timeout: 5000 }, async () => {
 await test("garbage-to-server", { timeout: 5000 }, async () => {
   const echoServer = new EchoOriginAndBrowser();
   await echoServer.startAndWaitUntilListening();
-  const server = new TunnelServer(serverOptions);
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
   server.start();
   await server.waitUntilListening();
 
@@ -929,16 +985,75 @@ await test("garbage-to-server", { timeout: 5000 }, async () => {
   const stopBadClient = await createBadTlsClient(TUNNEL_PORT);
   await sleep(1000);
   await echoServer.expectEconn();
-  assert.strictEqual(server.session, null);
+  assert.strictEqual(server.activeSession, null);
 
   // Let the network recover and make a successful connection
   await stopBadClient();
-  const client = new TunnelClient(clientOptions);
+  const client = new TunnelClient(DEFAULT_CLIENT_OPTIONS);
   client.start();
   await server.waitUntilConnected();
   await echoServer.expectPingPongAndClose();
 
   await client.stop();
+  await server.stop();
+  await echoServer.stop();
+});
+
+await test("latest-client-wins", { timeout: 5000 }, async () => {
+  const echoServer = new EchoOriginAndBrowser();
+  await echoServer.startAndWaitUntilListening();
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+  server.start();
+  await server.waitUntilListening();
+
+  const client1 = new TunnelClient({
+    ...DEFAULT_CLIENT_OPTIONS,
+    logger: getLogger("client1", 33),
+  });
+  const client2 = new TunnelClient({
+    ...DEFAULT_CLIENT_OPTIONS,
+    logger: getLogger("client2", 33),
+  });
+
+  client1.start();
+
+  await client1.waitUntilConnected();
+  await server.waitUntilConnected();
+
+  await echoServer.expectPingPongAndClose();
+
+  LOG_LINES = [];
+
+  client2.start();
+  await client2.waitUntilConnected();
+  await server.waitUntilConnected();
+
+  await echoServer.expectPingPongAndClose();
+
+  assertLastLines([
+    "client2   connecting",
+    "server   disconnected",
+    "client1   disconnected",
+    `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    `client2   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    "server   stream0 forwarded from [::1]:00",
+    "client2   stream0 forwarding to [::1]:00",
+    "server   stream0 send 1",
+    "client2   stream0 recv 1",
+    "client2   stream0 send 1",
+    "server   stream0 recv 1",
+    "server   stream0 send FIN",
+    "client2   stream0 recv FIN",
+    "client2   stream0 send 1",
+    "client2   stream0 send FIN",
+    "client2   stream0 closed",
+    "server   stream0 recv 1",
+    "server   stream0 recv FIN",
+    "server   stream0 closed",
+  ]);
+
+  await client1.stop();
+  await client2.stop();
   await server.stop();
   await echoServer.stop();
 });
