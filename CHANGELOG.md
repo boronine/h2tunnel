@@ -1,3 +1,8 @@
+### WIP
+
+- Clean up logging
+- Make sure latest tunnel kills previous tunnel, so if a connection hangs, the client is able to reset it
+
 ### 0.3.1
 
 - Add IPv6 support
