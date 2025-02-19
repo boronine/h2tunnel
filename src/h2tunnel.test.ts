@@ -24,7 +24,7 @@ const TUNNEL_PORT = 15005;
 const TUNNEL2_PORT = 15008;
 
 // Reduce this to make tests faster
-const TIME_MULTIPLIER = 0.2;
+const TIME_MULTIPLIER = Number(process.env["TIME_MULTIPLIER"] ?? "0.2");
 
 // This keypair is issued for example.com: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=example.com"
 
@@ -358,7 +358,7 @@ class EchoOriginAndBrowser extends Stoppable {
     const curConnectionId = this.browserSockets.size.toString();
     await new Promise<void>((resolve) => browserSocket.on("connect", resolve));
     // Send ID byte and wait for it to come back
-    await sleep(200);
+    await sleep(300);
     browserSocket.write(curConnectionId);
     const chunk = await new Promise<Buffer>((resolve) =>
       browserSocket.once("data", resolve),
@@ -852,8 +852,6 @@ await test(
     await client.stop();
     client.start();
 
-    await sleep(10);
-
     // Wait until client reconnected and make a request
     await echo.expectEconn();
     await server.waitUntilConnected();
@@ -1008,7 +1006,7 @@ await test(
   },
 );
 
-await test.only(
+await test(
   "garbage-to-server",
   { timeout: 10000 * TIME_MULTIPLIER },
   async (t) => {
