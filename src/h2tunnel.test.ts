@@ -1052,10 +1052,12 @@ await test(
 await test(
   "latest-client-wins",
   { timeout: 10000 * TIME_MULTIPLIER },
-  async () => {
+  async (t) => {
     const echoServer = new EchoOriginAndBrowser();
+    t.after(() => echoServer.stop());
     await echoServer.startAndWaitUntilListening();
     const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+    t.after(() => server.stop());
     server.start();
     await server.waitUntilListening();
 
@@ -1063,10 +1065,12 @@ await test(
       ...DEFAULT_CLIENT_OPTIONS,
       logger: getLogger("client1", 33),
     });
+    t.after(() => client1.stop());
     const client2 = new TunnelClient({
       ...DEFAULT_CLIENT_OPTIONS,
       logger: getLogger("client2", 33),
     });
+    t.after(() => client2.stop());
 
     client1.start();
 
@@ -1104,10 +1108,5 @@ await test(
       "server   stream0 recv FIN",
       "server   stream0 closed",
     ]);
-
-    await client1.stop();
-    await client2.stop();
-    await server.stop();
-    await echoServer.stop();
   },
 );

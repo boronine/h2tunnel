@@ -57,12 +57,12 @@ usage: h2tunnel <command> [options]
 commands:
   client
   server
-
+ 
 client options:
   --crt <path>                 Path to certificate file (.crt)
   --key <path>                 Path to private key file (.key)
   --tunnel-host <host>         Host for the tunnel server
-  --tunnel-port <port>         Port for the tunnel server
+  --tunnel-port <port>         Port for the tunnel server (default 15900)
   --origin-host <host>         Host for the local TCP server (default: localhost)
   --origin-port <port>         Port for the local TCP server
 
@@ -70,10 +70,10 @@ server options:
   --crt <path>                 Path to certificate file (.crt)
   --key <path>                 Path to private key file (.key)
   --tunnel-listen-ip <ip>      IP for the tunnel server to bind on (default: ::0)
-  --tunnel-listen-port <port>  Port for the tunnel server to listen on
+  --tunnel-listen-port <port>  Port for the tunnel server to listen on (default 15900)
   --proxy-listen-ip <ip>       IP for the remote TCP proxy server to bind on (default: ::0)
   --proxy-listen-port <port>   Port for the remote TCP proxy server to listen on
-
+  
 The tunnel and proxy servers will bind to ::0 by default which will make them publically available. This requires
 superuser permissions on Linux. You can change this setting to bind to a specific network interface, e.g. a VPN, but
 this is advanced usage. Note that on most operating systems, binding to ::0 will also bind to 0.0.0.0.
@@ -102,7 +102,6 @@ proxy on port 80. Make sure these are open in your firewall.
 sudo h2tunnel server \
   --crt h2tunnel.crt \
   --key h2tunnel.key \
-  --tunnel-listen-port 15001 \
   --proxy-listen-port 80
 ```
 
@@ -113,7 +112,6 @@ h2tunnel client \
   --crt h2tunnel.crt \
   --key h2tunnel.key \
   --tunnel-host=mysite.example.com \
-  --tunnel-port=15001 \
   --origin-port=8000
 ```
 
@@ -164,7 +162,7 @@ const client = new TunnelClient({
   originHost: "localhost", // optional
   originPort: 8000,
   tunnelHost: `mysite.example.com`,
-  tunnelPort: 15001,
+  tunnelPort: 15900, // optional
 });
 
 // Start the client
@@ -185,7 +183,7 @@ const server = new TunnelServer({
   key: `-----BEGIN PRIVATE KEY----- ...`,
   cert: `-----BEGIN CERTIFICATE----- ...`,
   tunnelListenIp: "::0", // optional
-  tunnelListenPort: 15001,
+  tunnelListenPort: 15900, // optional
   proxyListenIp: "::0", // optional
   proxyListenPort: 80,
 });

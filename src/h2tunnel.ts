@@ -7,6 +7,7 @@ import http2 from "node:http2";
 export const DEFAULT_LISTEN_IP = "::0";
 export const DEFAULT_ORIGIN_HOST = "localhost";
 export const DEFAULT_TUNNEL_RESTART_TIMEOUT = 1000;
+export const DEFAULT_TUNNEL_PORT = 15900;
 
 interface CommonOptions {
   logger?: (line: any) => void;
@@ -16,7 +17,7 @@ interface CommonOptions {
 
 export interface ServerOptions extends CommonOptions {
   tunnelListenIp?: string;
-  tunnelListenPort: number;
+  tunnelListenPort?: number;
   proxyListenIp?: string;
   proxyListenPort: number;
 }
@@ -25,7 +26,7 @@ export interface ClientOptions extends CommonOptions {
   originHost?: string;
   originPort: number;
   tunnelHost: string;
-  tunnelPort: number;
+  tunnelPort?: number;
   tunnelRestartTimeout?: number;
 }
 
@@ -230,7 +231,7 @@ export class TunnelServer extends AbstractTunnel<
       this.log(`tunnelServer error ${err.toString()}`),
     );
     tunnelServer.on("drop", () => {
-      console.log('drop')
+      console.log("drop");
     });
     tunnelServer.on("secureConnection", (tunnelSocket: tls.TLSSocket) => {
       // Make sure latest tunnel kills previous tunnel
@@ -292,7 +293,7 @@ export class TunnelServer extends AbstractTunnel<
       this.options.proxyListenIp ?? DEFAULT_LISTEN_IP,
     );
     this.tunnelServer.listen(
-      this.options.tunnelListenPort,
+      this.options.tunnelListenPort ?? DEFAULT_TUNNEL_PORT,
       this.options.tunnelListenIp ?? DEFAULT_LISTEN_IP,
     );
   }
@@ -343,7 +344,7 @@ export class TunnelClient extends AbstractTunnel<
     }
     const tunnelSocket = tls.connect({
       host: this.options.tunnelHost,
-      port: this.options.tunnelPort,
+      port: this.options.tunnelPort ?? DEFAULT_TUNNEL_PORT,
       cert: this.options.cert,
       key: this.options.key,
       ca: [this.options.cert],
