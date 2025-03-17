@@ -27,7 +27,7 @@ services:
     ports:
       - "80" # for caddy
       - "15900:15900"
-    command: h2tunnel server --crt=/run/secrets/crt --key=/run/secrets/key --proxy-listen-port=80
+    command: h2tunnel server --crt /run/secrets/crt --key /run/secrets/key --proxy-listen-port 80
 secrets:
   crt:
     file: ./h2tunnel.crt

@@ -111,8 +111,8 @@ On your local machine, we will connect to the tunnel and forward a local HTTP se
 h2tunnel client \
   --crt h2tunnel.crt \
   --key h2tunnel.key \
-  --tunnel-host=mysite.example.com \
-  --origin-port=8000
+  --tunnel-host mysite.example.com \
+  --origin-port 8000
 ```
 
 If you have python3 installed, you can test using this built-in HTTP server:

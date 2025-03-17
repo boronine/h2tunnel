@@ -6,7 +6,7 @@ import http2 from "node:http2";
 
 export const DEFAULT_LISTEN_IP = "::0";
 export const DEFAULT_ORIGIN_HOST = "localhost";
-export const DEFAULT_TUNNEL_RESTART_TIMEOUT = 1000;
+export const DEFAULT_TIMEOUT = 5000;
 export const DEFAULT_TUNNEL_PORT = 15900;
 
 interface CommonOptions {
@@ -27,7 +27,7 @@ export interface ClientOptions extends CommonOptions {
   originPort: number;
   tunnelHost: string;
   tunnelPort?: number;
-  tunnelRestartTimeout?: number;
+  timeout?: number;
 }
 
 const formatAddr = (family?: string, address?: string, port?: number) =>
@@ -257,6 +257,7 @@ export class TunnelServer extends AbstractTunnel<
       });
       session.on(`remoteSettings`, () => {
         this.activeSession = session;
+        this.activeSession.on("ping", () => {});
         this.log(
           `connected to ${formatLocal(tunnelSocket)} from ${formatRemote(tunnelSocket)}`,
         );
@@ -313,6 +314,7 @@ export class TunnelClient extends AbstractTunnel<
 > {
   // The tunnel will not restart as long as this property is not null
   restartTimeout: NodeJS.Timeout | null = null;
+  pingTimeout: NodeJS.Timeout | null = null;
 
   constructor(readonly options: ClientOptions) {
     super(options.logger, http2.createServer());
@@ -342,14 +344,20 @@ export class TunnelClient extends AbstractTunnel<
     if (this.restartTimeout) {
       clearTimeout(this.restartTimeout);
     }
+    if (this.pingTimeout) {
+      clearTimeout(this.pingTimeout);
+    }
+    const timeout = this.options.timeout ?? DEFAULT_TIMEOUT;
     const tunnelSocket = tls.connect({
       host: this.options.tunnelHost,
       port: this.options.tunnelPort ?? DEFAULT_TUNNEL_PORT,
       cert: this.options.cert,
       key: this.options.key,
       ca: [this.options.cert],
+      timeout: timeout,
       checkServerIdentity: () => undefined,
     });
+    tunnelSocket.on("timeout", () => tunnelSocket.destroy(new Error()));
     this.tunnelSocket = tunnelSocket;
     const address = this.muxServer.address() as net.AddressInfo;
     const muxSocket = net.createConnection({
@@ -369,7 +377,7 @@ export class TunnelClient extends AbstractTunnel<
         this.restartTimeout = this.setTimeout(() => {
           this.log("restarting");
           this.startTunnel();
-        }, this.options.tunnelRestartTimeout ?? DEFAULT_TUNNEL_RESTART_TIMEOUT);
+        }, timeout);
       }
     });
     this.muxServer.once("session", (session: http2.ServerHttp2Session) => {
@@ -377,6 +385,19 @@ export class TunnelClient extends AbstractTunnel<
       session.on("error", () => {});
       tunnelSocket.on("close", () => session.destroy(new Error()));
       session.on("remoteSettings", () => {
+        const ping = () => {
+          this.pingTimeout = this.setTimeout(() => {
+            if (!session.destroyed) {
+              session.ping((err, duration) => {
+                // When session is destroyed we get ERR_HTTP2_PING_CANCEL
+                if (!err) {
+                  ping();
+                }
+              });
+            }
+          }, timeout * 0.5);
+        };
+        ping();
         this.log(
           `connected to ${formatRemote(tunnelSocket)} from ${formatLocal(tunnelSocket)}`,
         );

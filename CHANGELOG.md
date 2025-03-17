@@ -2,6 +2,7 @@
 
 - Clean up logging
 - Make sure latest tunnel kills previous tunnel, so if a connection hangs, the client is able to reset it
+- Implement keepalive using HTTP2 PING and TCP timeout
 
 ### 0.3.1
 
