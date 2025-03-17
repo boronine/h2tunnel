@@ -1,4 +1,4 @@
-### WIP
+### 0.4.0
 
 - Clean up logging
 - Make sure latest tunnel kills previous tunnel, so if a connection hangs, the client is able to reset it
