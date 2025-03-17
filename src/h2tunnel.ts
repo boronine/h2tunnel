@@ -193,7 +193,7 @@ export class TunnelServer extends AbstractTunnel<
   http2.ClientHttp2Session,
   net.Server
 > {
-  listeningEvent = new events.EventEmitter<Record<"listening", []>>();
+  listeningPomise: Promise<void> | null = null;
   constructor(
     readonly options: ServerOptions,
     readonly tunnelServer = tls.createServer({
@@ -230,9 +230,6 @@ export class TunnelServer extends AbstractTunnel<
     tunnelServer.on("error", (err) =>
       this.log(`tunnelServer error ${err.toString()}`),
     );
-    tunnelServer.on("drop", () => {
-      console.log("drop");
-    });
     tunnelServer.on("secureConnection", (tunnelSocket: tls.TLSSocket) => {
       // Make sure latest tunnel kills previous tunnel
       this.tunnelSocket?.destroy();
@@ -266,29 +263,35 @@ export class TunnelServer extends AbstractTunnel<
     });
   }
 
-  isListening() {
-    return (
-      this.muxServer.listening &&
-      this.proxyServer.listening &&
-      this.tunnelServer.listening
-    );
-  }
-
   start() {
     super.start();
     this.addCloseable(this.proxyServer);
     this.addCloseable(this.tunnelServer);
     let listening = false;
-    const hook = () => {
-      if (!listening && this.isListening()) {
-        listening = true;
-        this.log("listening");
-        this.listeningEvent.emit("listening");
-      }
-    };
-    this.muxServer.once("listening", hook);
-    this.proxyServer.once("listening", hook);
-    this.tunnelServer.once("listening", hook);
+    this.listeningPomise = new Promise<void>((resolve, reject) => {
+      const hook = () => {
+        if (
+          !listening &&
+          this.muxServer.listening &&
+          this.proxyServer.listening &&
+          this.tunnelServer.listening
+        ) {
+          listening = true;
+          this.log("listening");
+          this.muxServer.removeListener("error", reject);
+          this.proxyServer.removeListener("error", reject);
+          this.tunnelServer.removeListener("error", reject);
+          resolve();
+        }
+      };
+      this.muxServer.on("error", reject);
+      this.proxyServer.on("error", reject);
+      this.tunnelServer.on("error", reject);
+      this.muxServer.once("listening", hook);
+      this.proxyServer.once("listening", hook);
+      this.tunnelServer.once("listening", hook);
+    });
+
     this.proxyServer.listen(
       this.options.proxyListenPort,
       this.options.proxyListenIp ?? DEFAULT_LISTEN_IP,
@@ -300,11 +303,7 @@ export class TunnelServer extends AbstractTunnel<
   }
 
   async waitUntilListening() {
-    if (!this.isListening()) {
-      await new Promise<void>((resolve) =>
-        this.listeningEvent.once("listening", resolve),
-      );
-    }
+    await this.listeningPomise;
   }
 }
 
@@ -388,7 +387,7 @@ export class TunnelClient extends AbstractTunnel<
         const ping = () => {
           this.pingTimeout = this.setTimeout(() => {
             if (!session.destroyed) {
-              session.ping((err, duration) => {
+              session.ping((err) => {
                 // When session is destroyed we get ERR_HTTP2_PING_CANCEL
                 if (!err) {
                   ping();

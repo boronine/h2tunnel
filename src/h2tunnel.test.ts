@@ -901,134 +901,130 @@ await test(
   },
 );
 
-await test.only(
-  "bad-network",
-  { timeout: 100000 * TIME_MULTIPLIER },
-  async (t) => {
-    LOG_LINES = [];
-    const echo = new EchoOriginAndBrowser();
-    t.after(() => echo.stop());
-    const net = new NetworkEmulator({
-      listenHost: "::1",
-      listenPort: TUNNEL2_PORT,
-      forwardHost: "::1",
-      forwardPort: TUNNEL_PORT,
-    });
-    t.after(() => net.stop());
-    const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
-    t.after(() => server.stop());
-    const client = new TunnelClient({
-      ...DEFAULT_CLIENT_OPTIONS,
-      tunnelPort: TUNNEL2_PORT,
-    });
-    t.after(() => client.stop());
+await test("bad-network", { timeout: 100000 * TIME_MULTIPLIER }, async (t) => {
+  LOG_LINES = [];
+  const echo = new EchoOriginAndBrowser();
+  t.after(() => echo.stop());
+  const net = new NetworkEmulator({
+    listenHost: "::1",
+    listenPort: TUNNEL2_PORT,
+    forwardHost: "::1",
+    forwardPort: TUNNEL_PORT,
+  });
+  t.after(() => net.stop());
+  const server = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+  t.after(() => server.stop());
+  const client = new TunnelClient({
+    ...DEFAULT_CLIENT_OPTIONS,
+    tunnelPort: TUNNEL2_PORT,
+  });
+  t.after(() => client.stop());
 
-    await echo.startAndWaitUntilListening();
-    await net.startAndWaitUntilReady();
+  await echo.startAndWaitUntilListening();
+  await net.startAndWaitUntilReady();
 
-    server.start();
-    await server.waitUntilListening();
+  server.start();
+  await server.waitUntilListening();
 
-    // Wait until client is connected and test 200
-    client.start();
-    await client.waitUntilConnected();
-    await server.waitUntilConnected();
+  // Wait until client is connected and test 200
+  client.start();
+  await client.waitUntilConnected();
+  await server.waitUntilConnected();
 
-    assertLastLines([
-      "server   listening",
-      "client   connecting",
-      `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-      `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
-    ]);
+  assertLastLines([
+    "server   listening",
+    "client   connecting",
+    `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
+  ]);
 
-    // Make one request
-    await echo.expectPingPongAndClose();
+  // Make one request
+  await echo.expectPingPongAndClose();
 
-    assertLastLines([
-      "server   stream0 forwarded from [::1]:00",
-      "client   stream0 forwarding to [::1]:00",
-      "server   stream0 send 1",
-      "client   stream0 recv 1",
-      "client   stream0 send 1",
-      "server   stream0 recv 1",
-      "server   stream0 send FIN",
-      "client   stream0 recv FIN",
-      "client   stream0 send 1",
-      "client   stream0 send FIN",
-      "client   stream0 closed",
-      "server   stream0 recv 1",
-      "server   stream0 recv FIN",
-      "server   stream0 closed",
-    ]);
+  assertLastLines([
+    "server   stream0 forwarded from [::1]:00",
+    "client   stream0 forwarding to [::1]:00",
+    "server   stream0 send 1",
+    "client   stream0 recv 1",
+    "client   stream0 send 1",
+    "server   stream0 recv 1",
+    "server   stream0 send FIN",
+    "client   stream0 recv FIN",
+    "client   stream0 send 1",
+    "client   stream0 send FIN",
+    "client   stream0 closed",
+    "server   stream0 recv 1",
+    "server   stream0 recv FIN",
+    "server   stream0 closed",
+  ]);
 
-    // Break tunnel while no requests are taking place
-    await net.breakConn();
+  // Break tunnel while no requests are taking place
+  await net.breakConn();
 
-    await sleep(100);
-    await echo.expectEconn();
+  await sleep(100);
+  await echo.expectEconn();
 
-    assertLastLines([
-      "client   disconnected",
-      "server   disconnected",
-      "server   rejecting connection from [::1]:00",
-    ]);
+  assertLastLines([
+    "client   disconnected",
+    "server   disconnected",
+    "server   rejecting connection from [::1]:00",
+  ]);
 
-    // Wait until client reconnected and make a request
-    await server.waitUntilConnected();
-    await client.waitUntilConnected();
-    await echo.expectPingPongAndClose();
+  // Wait until client reconnected and make a request
+  await server.waitUntilConnected();
+  await client.waitUntilConnected();
+  await echo.expectPingPongAndClose();
 
-    assertLastLines([
-      "client   restarting",
-      `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-      `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
-      "server   stream0 forwarded from [::1]:00",
-      "client   stream0 forwarding to [::1]:00",
-      "server   stream0 send 1",
-      "client   stream0 recv 1",
-      "client   stream0 send 1",
-      "server   stream0 recv 1",
-      "server   stream0 send FIN",
-      "client   stream0 recv FIN",
-      "client   stream0 send 1",
-      "client   stream0 send FIN",
-      "client   stream0 closed",
-      "server   stream0 recv 1",
-      "server   stream0 recv FIN",
-      "server   stream0 closed",
-    ]);
+  assertLastLines([
+    "client   restarting",
+    `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
+    "server   stream0 forwarded from [::1]:00",
+    "client   stream0 forwarding to [::1]:00",
+    "server   stream0 send 1",
+    "client   stream0 recv 1",
+    "client   stream0 send 1",
+    "server   stream0 recv 1",
+    "server   stream0 send FIN",
+    "client   stream0 recv FIN",
+    "client   stream0 send 1",
+    "client   stream0 send FIN",
+    "client   stream0 closed",
+    "server   stream0 recv 1",
+    "server   stream0 recv FIN",
+    "server   stream0 closed",
+  ]);
 
-    // Break tunnel during a request
-    const promise1 = echo.expectEconn();
-    await sleep(5);
-    await net.breakConn();
-    await sleep(10);
-    await promise1;
+  // Break tunnel during a request
+  const promise1 = echo.expectEconn();
+  await sleep(5);
+  await net.breakConn();
+  await sleep(10);
+  await promise1;
 
-    await client.waitUntilConnected();
-    await server.waitUntilConnected();
+  await client.waitUntilConnected();
+  await server.waitUntilConnected();
 
-    LOG_LINES = [];
+  LOG_LINES = [];
 
-    net.unpipe();
+  net.unpipe();
 
-    await sleep(TIMEOUT * 0.25);
+  await sleep(TIMEOUT * 0.25);
 
-    // Too early to detect timeout
-    assertLastLines([]);
+  // Too early to detect timeout
+  assertLastLines([]);
 
-    await sleep(TIMEOUT * 4);
+  await sleep(TIMEOUT * 4);
 
-    // Timeout activated because ping frame could not go through
-    assertLastLines([
-      "client   disconnected",
-      "client   restarting",
-      "server   disconnected",
-      `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
-      `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
-    ]);
-  },
-);
+  // Timeout activated because ping frame could not go through
+  assertLastLines([
+    "client   disconnected",
+    "client   restarting",
+    "server   disconnected",
+    `server   connected to [::1]:${TUNNEL_PORT} from [::1]:00`,
+    `client   connected to [::1]:${TUNNEL2_PORT} from [::1]:00`,
+  ]);
+});
 
 await test(
   "garbage-to-client",
@@ -1149,3 +1145,16 @@ await test(
     ]);
   },
 );
+
+await test("addr-in-use", { timeout: 10000 * TIME_MULTIPLIER }, async (t) => {
+  const server1 = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+  const server2 = new TunnelServer(DEFAULT_SERVER_OPTIONS);
+  t.after(() => server1.stop());
+  t.after(() => server2.stop());
+  server1.start();
+  await server1.waitUntilListening();
+  server2.start();
+  await t.assert.rejects(() => server2.waitUntilListening(), {
+    message: /EADDRINUSE/,
+  });
+});
