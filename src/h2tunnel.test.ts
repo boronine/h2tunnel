@@ -1154,7 +1154,7 @@ await test("addr-in-use", { timeout: 10000 * TIME_MULTIPLIER }, async (t) => {
   server1.start();
   await server1.waitUntilListening();
   server2.start();
-  await t.assert.rejects(() => server2.waitUntilListening(), {
+  await assert.rejects(() => server2.waitUntilListening(), {
     message: /EADDRINUSE/,
   });
 });
