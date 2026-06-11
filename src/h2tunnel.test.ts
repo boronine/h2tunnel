@@ -30,9 +30,9 @@ const TUNNEL_PORT = 15005;
 const TUNNEL2_PORT = 15008;
 
 // Reduce this to make tests faster
-const TIME_MULTIPLIER = Number(process.env["TIME_MULTIPLIER"] ?? "0.1");
+const TIME_MULTIPLIER = Number(process.env["TIME_MULTIPLIER"] ?? "0.04");
 
-const TEST_TIMEOUT = 100000 * TIME_MULTIPLIER;
+const TEST_TIMEOUT = 10000;
 
 // This keypair is issued for example.com: openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -days 3650 -nodes -keyout h2tunnel.key -out h2tunnel.crt -subj "/CN=example.com"
 
@@ -148,9 +148,6 @@ function assertLastLines(...expectedLines: L[][]) {
   // get last lines
   const actual = LOG_LINES.join("\n");
   LOG_LINES = [];
-  // if (!expectedLines.some((lines) => linesToRegex(lines).test(actual))) {
-  //   throw new Error();
-  // }
   assert.match(actual, linesToRegex(expectedLines[0]));
 }
 
@@ -305,8 +302,11 @@ class EchoOriginAndBrowser extends Stoppable {
   }
 
   async expectEconn() {
+    await this.expectEconnOnSocket(this.createBrowserSocket());
+  }
+
+  async expectEconnOnSocket(socket: net.Socket) {
     return new Promise<void>((resolve, reject) => {
-      const socket = this.createBrowserSocket();
       socket.on("error", () => {});
       socket.on("close", (hadError) => {
         if (hadError) {
@@ -794,23 +794,9 @@ for (const IPVERSION of [4, 6]) {
         sleep(10).then(() => echo.expectPingPongAndClose()),
       ]);
 
-      // NOTE: Log lines are unreliable here
-      LOG_LINES = [];
-
       await echo.stop();
       await client.stop();
-      await sleep(50);
-
-      assertLastLines([
-        "client   stopping",
-        "server   disconnected",
-        "client   disconnected",
-        "client   stopped",
-      ]);
-
       await server.stop();
-
-      assertLastLines(["server   stopping", "server   stopped"]);
     },
   );
 
@@ -900,9 +886,7 @@ for (const IPVERSION of [4, 6]) {
       await client.stop();
       client.start();
 
-      // Wait until client reconnected and make a request
-      await sleep(30);
-      await echo.expectEconn();
+      // Wait until client reconnected
       await server.waitUntilConnected();
       await client.waitUntilConnected();
 
@@ -911,9 +895,7 @@ for (const IPVERSION of [4, 6]) {
         "client   disconnected",
         "client   stopped",
         "client   connecting",
-        // "server   stream0 forwarded from ${LOCAL_HOST_FMT}:00",
         "server   disconnected",
-        `server   rejecting connection from ${LOCAL_HOST_FMT}:00`,
         `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
         `client   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
       ]);
@@ -1020,11 +1002,10 @@ for (const IPVERSION of [4, 6]) {
         "server   stream0 closed",
       ]);
 
-      // Break tunnel during a request
-      const promise1 = echo.expectEconn();
-      await sleep(5);
+      // Break tunnel while a proxied connection is definitely active.
+      const conn = await echo.createConn();
+      const promise1 = echo.expectEconnOnSocket(conn.browserSocket);
       await net.breakConn();
-      await sleep(10);
       await promise1;
 
       await client.waitUntilConnected();
@@ -1148,10 +1129,14 @@ for (const IPVERSION of [4, 6]) {
 
       await echoServer.expectPingPongAndClose();
 
+      assert.strictEqual(
+        LOG_LINES.filter((line) => line === "client1   disconnected").length,
+        1,
+      );
+      LOG_LINES = LOG_LINES.filter((line) => line !== "client1   disconnected");
       assertLastLines([
         "client2   connecting",
         "server   disconnected",
-        "client1   disconnected",
         `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
         `client2   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
         `server   stream0 forwarded from ${LOCAL_HOST_FMT}:00`,

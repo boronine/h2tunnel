@@ -121,9 +121,24 @@ export abstract class AbstractTunnel<
     );
   }
 
-  addStream(socket: net.Socket, stream: http2.Http2Stream): number {
+  protected reserveStream(
+    socket: net.Socket,
+    stream: http2.Http2Stream,
+  ): number {
     const streamId = this.activeStreams.size;
     this.activeStreams.set(stream, socket);
+    stream.on("close", () => {
+      this.log(`stream${streamId} closed`);
+      this.activeStreams.delete(stream);
+    });
+    return streamId;
+  }
+
+  protected connectStream(
+    socket: net.Socket,
+    stream: http2.Http2Stream,
+    streamId: number,
+  ) {
     // Error can be on the socket side or on the stream side. Socket error is logged as error, stream error is logged as RST
     socket.on("error", (error) => {
       this.log(`stream${streamId} error ${error.toString()}`);
@@ -134,10 +149,6 @@ export abstract class AbstractTunnel<
       if (!socket.errored) {
         this.log(`stream${streamId} recv RST`);
       }
-    });
-    stream.on("close", () => {
-      this.log(`stream${streamId} closed`);
-      this.activeStreams.delete(stream);
     });
     const setup = (
       duplex1: stream.Duplex,
@@ -164,6 +175,11 @@ export abstract class AbstractTunnel<
 
     setup(socket, stream, "send", () => stream.destroy(new Error()));
     setup(stream, socket, "recv", () => socket.resetAndDestroy());
+  }
+
+  addStream(socket: net.Socket, stream: http2.Http2Stream): number {
+    const streamId = this.reserveStream(socket, stream);
+    this.connectStream(socket, stream, streamId);
     return streamId;
   }
 
@@ -217,8 +233,11 @@ export class TunnelServer extends AbstractTunnel<
           [http2.constants.HTTP2_HEADER_METHOD]: "POST",
         });
         this.addDestroyable(stream);
-        const streamId = this.addStream(socket, stream);
+        const streamId = this.reserveStream(socket, stream);
         this.log(`stream${streamId} forwarded from ${formatRemote(socket)}`);
+        stream.once("response", () =>
+          this.connectStream(socket, stream, streamId),
+        );
       }
     });
     proxyServer.on("error", (err) =>
@@ -318,18 +337,19 @@ export class TunnelClient extends AbstractTunnel<
   constructor(readonly options: ClientOptions) {
     super(options.logger, http2.createServer());
     this.muxServer.on("listening", () => this.startTunnel());
-    this.muxServer.on("stream", (stream: http2.ClientHttp2Stream) => {
+    this.muxServer.on("stream", (stream: http2.ServerHttp2Stream) => {
       this.addDestroyable(stream);
+      const originHost = this.options.originHost ?? DEFAULT_ORIGIN_HOST;
       const socket = net.createConnection({
-        host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,
+        host: originHost,
         port: this.options.originPort,
         allowHalfOpen: true,
       });
       this.addDestroyable(socket);
-      // Wait for connection so we know the local port
       socket.on("connect", () => {
         const streamId = this.addStream(socket, stream);
         this.log(`stream${streamId} forwarding to ${formatLocal(socket)}`);
+        stream.respond({ [http2.constants.HTTP2_HEADER_STATUS]: 200 });
       });
     });
   }
