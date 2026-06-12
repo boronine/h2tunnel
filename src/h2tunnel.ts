@@ -109,6 +109,7 @@ export abstract class AbstractTunnel<
   activeStreams: Map<http2.Http2Stream, net.Socket> = new Map();
   aborted: boolean = false;
   connectedEvent = new events.EventEmitter<Record<"connected", []>>();
+  disconnectedEvent = new events.EventEmitter<Record<"disconnected", []>>();
 
   protected constructor(
     readonly log: (line: LogLine) => void = (line) =>
@@ -203,6 +204,12 @@ export abstract class AbstractTunnel<
       );
     }
   }
+
+  async waitUntilDisconnected() {
+    await new Promise<void>((resolve) =>
+      this.disconnectedEvent.once("disconnected", resolve),
+    );
+  }
 }
 
 export class TunnelServer extends AbstractTunnel<
@@ -258,6 +265,7 @@ export class TunnelServer extends AbstractTunnel<
       tunnelSocket.on("close", () => {
         session.destroy(new Error());
         this.log(`disconnected`);
+        this.disconnectedEvent.emit("disconnected");
       });
       const address = this.muxServer.address() as net.AddressInfo;
       const session: http2.ClientHttp2Session = http2.connect(
@@ -391,6 +399,7 @@ export class TunnelClient extends AbstractTunnel<
     tunnelSocket.on("error", () => {});
     tunnelSocket.on("close", () => {
       this.log(`disconnected`);
+      this.disconnectedEvent.emit("disconnected");
       muxSocket.destroy();
       if (!this.aborted) {
         this.restartTimeout = this.setTimeout(() => {

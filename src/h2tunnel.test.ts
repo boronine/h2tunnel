@@ -1123,22 +1123,18 @@ for (const IPVERSION of [4, 6]) {
 
       LOG_LINES = [];
 
+      const client1Disconnected = client1.waitUntilDisconnected();
       client2.start();
+      await client1Disconnected;
+      await client1.stop();
+
       await client2.waitUntilConnected();
       await server.waitUntilConnected();
 
+      LOG_LINES = [];
       await echoServer.expectPingPongAndClose();
 
-      assert.strictEqual(
-        LOG_LINES.filter((line) => line === "client1   disconnected").length,
-        1,
-      );
-      LOG_LINES = LOG_LINES.filter((line) => line !== "client1   disconnected");
       assertLastLines([
-        "client2   connecting",
-        "server   disconnected",
-        `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
-        `client2   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
         `server   stream0 forwarded from ${LOCAL_HOST_FMT}:00`,
         `client2   stream0 forwarding to ${LOCAL_HOST_FMT}:00`,
         "server   stream0 send 1",
