@@ -1,4 +1,4 @@
-import events from "node:events";
+import { EventEmitter, once } from "node:events";
 import stream from "node:stream";
 import net from "node:net";
 import tls from "node:tls";
@@ -67,6 +67,9 @@ interface Destroyable {
   on(event: "close", listener: () => void): void;
 }
 
+const waitClosed = (closeable: Closeable | Destroyable) =>
+  new Promise<void>((resolve) => closeable.on("close", resolve));
+
 export class Stoppable {
   closeables: Set<Closeable> = new Set();
   destroyables: Set<Destroyable> = new Set();
@@ -92,10 +95,7 @@ export class Stoppable {
     [...this.closeables].forEach((closeable) => closeable.close());
     [...this.destroyables].forEach((closeable) => closeable.destroy());
     await Promise.all(
-      [...this.closeables, ...this.destroyables].map(
-        (closeable) =>
-          new Promise<void>((resolve) => closeable.on("close", resolve)),
-      ),
+      [...this.closeables, ...this.destroyables].map(waitClosed),
     );
   }
 }
@@ -108,7 +108,7 @@ export abstract class AbstractTunnel<
   tunnelSocket: tls.TLSSocket | null = null;
   activeStreams: Map<http2.Http2Stream, net.Socket> = new Map();
   aborted: boolean = false;
-  connectedEvent = new events.EventEmitter<Record<"connected", []>>();
+  tunnelEvent = new EventEmitter<Record<"connected" | "disconnected", []>>();
 
   protected constructor(
     readonly log: (line: LogLine) => void = (line) =>
@@ -121,9 +121,21 @@ export abstract class AbstractTunnel<
     );
   }
 
-  addStream(socket: net.Socket, stream: http2.Http2Stream): number {
+  protected reserveStream(socket: net.Socket, stream: http2.Http2Stream) {
     const streamId = this.activeStreams.size;
     this.activeStreams.set(stream, socket);
+    stream.on("close", () => {
+      this.log(`stream${streamId} closed`);
+      this.activeStreams.delete(stream);
+    });
+    return streamId;
+  }
+
+  protected connectStream(
+    socket: net.Socket,
+    stream: http2.Http2Stream,
+    streamId: number,
+  ) {
     // Error can be on the socket side or on the stream side. Socket error is logged as error, stream error is logged as RST
     socket.on("error", (error) => {
       this.log(`stream${streamId} error ${error.toString()}`);
@@ -134,10 +146,6 @@ export abstract class AbstractTunnel<
       if (!socket.errored) {
         this.log(`stream${streamId} recv RST`);
       }
-    });
-    stream.on("close", () => {
-      this.log(`stream${streamId} closed`);
-      this.activeStreams.delete(stream);
     });
     const setup = (
       duplex1: stream.Duplex,
@@ -164,6 +172,11 @@ export abstract class AbstractTunnel<
 
     setup(socket, stream, "send", () => stream.destroy(new Error()));
     setup(stream, socket, "recv", () => socket.resetAndDestroy());
+  }
+
+  addStream(socket: net.Socket, stream: http2.Http2Stream): number {
+    const streamId = this.reserveStream(socket, stream);
+    this.connectStream(socket, stream, streamId);
     return streamId;
   }
 
@@ -182,10 +195,12 @@ export abstract class AbstractTunnel<
 
   async waitUntilConnected() {
     if (!this.activeSession || this.activeSession.destroyed) {
-      await new Promise<void>((resolve) =>
-        this.connectedEvent.once("connected", resolve),
-      );
+      await once(this.tunnelEvent, "connected");
     }
+  }
+
+  async waitUntilDisconnected() {
+    await once(this.tunnelEvent, "disconnected");
   }
 }
 
@@ -217,8 +232,11 @@ export class TunnelServer extends AbstractTunnel<
           [http2.constants.HTTP2_HEADER_METHOD]: "POST",
         });
         this.addDestroyable(stream);
-        const streamId = this.addStream(socket, stream);
+        const streamId = this.reserveStream(socket, stream);
         this.log(`stream${streamId} forwarded from ${formatRemote(socket)}`);
+        stream.once("response", () =>
+          this.connectStream(socket, stream, streamId),
+        );
       }
     });
     proxyServer.on("error", (err) =>
@@ -239,6 +257,7 @@ export class TunnelServer extends AbstractTunnel<
       tunnelSocket.on("close", () => {
         session.destroy(new Error());
         this.log(`disconnected`);
+        this.tunnelEvent.emit("disconnected");
       });
       const address = this.muxServer.address() as net.AddressInfo;
       const session: http2.ClientHttp2Session = http2.connect(
@@ -258,7 +277,7 @@ export class TunnelServer extends AbstractTunnel<
         this.log(
           `connected to ${formatLocal(tunnelSocket)} from ${formatRemote(tunnelSocket)}`,
         );
-        this.connectedEvent.emit("connected");
+        this.tunnelEvent.emit("connected");
       });
     });
   }
@@ -267,30 +286,11 @@ export class TunnelServer extends AbstractTunnel<
     super.start();
     this.addCloseable(this.proxyServer);
     this.addCloseable(this.tunnelServer);
-    let listening = false;
-    this.listeningPomise = new Promise<void>((resolve, reject) => {
-      const hook = () => {
-        if (
-          !listening &&
-          this.muxServer.listening &&
-          this.proxyServer.listening &&
-          this.tunnelServer.listening
-        ) {
-          listening = true;
-          this.log("listening");
-          this.muxServer.removeListener("error", reject);
-          this.proxyServer.removeListener("error", reject);
-          this.tunnelServer.removeListener("error", reject);
-          resolve();
-        }
-      };
-      this.muxServer.on("error", reject);
-      this.proxyServer.on("error", reject);
-      this.tunnelServer.on("error", reject);
-      this.muxServer.once("listening", hook);
-      this.proxyServer.once("listening", hook);
-      this.tunnelServer.once("listening", hook);
-    });
+    this.listeningPomise = Promise.all(
+      [this.muxServer, this.proxyServer, this.tunnelServer].map((server) =>
+        once(server, "listening"),
+      ),
+    ).then(() => void this.log("listening"));
 
     this.proxyServer.listen(
       this.options.proxyListenPort,
@@ -318,7 +318,7 @@ export class TunnelClient extends AbstractTunnel<
   constructor(readonly options: ClientOptions) {
     super(options.logger, http2.createServer());
     this.muxServer.on("listening", () => this.startTunnel());
-    this.muxServer.on("stream", (stream: http2.ClientHttp2Stream) => {
+    this.muxServer.on("stream", (stream: http2.ServerHttp2Stream) => {
       this.addDestroyable(stream);
       const socket = net.createConnection({
         host: this.options.originHost ?? DEFAULT_ORIGIN_HOST,
@@ -326,10 +326,10 @@ export class TunnelClient extends AbstractTunnel<
         allowHalfOpen: true,
       });
       this.addDestroyable(socket);
-      // Wait for connection so we know the local port
       socket.on("connect", () => {
         const streamId = this.addStream(socket, stream);
         this.log(`stream${streamId} forwarding to ${formatLocal(socket)}`);
+        stream.respond({ [http2.constants.HTTP2_HEADER_STATUS]: 200 });
       });
     });
   }
@@ -340,12 +340,8 @@ export class TunnelClient extends AbstractTunnel<
   }
 
   startTunnel() {
-    if (this.restartTimeout) {
-      clearTimeout(this.restartTimeout);
-    }
-    if (this.pingTimeout) {
-      clearTimeout(this.pingTimeout);
-    }
+    clearTimeout(this.restartTimeout ?? undefined);
+    clearTimeout(this.pingTimeout ?? undefined);
     const timeout = this.options.timeout ?? DEFAULT_TIMEOUT;
     const tunnelSocket = tls.connect({
       host: this.options.tunnelHost,
@@ -353,7 +349,7 @@ export class TunnelClient extends AbstractTunnel<
       cert: this.options.cert,
       key: this.options.key,
       ca: [this.options.cert],
-      timeout: timeout,
+      timeout,
       checkServerIdentity: () => undefined,
     });
     tunnelSocket.on("timeout", () => tunnelSocket.destroy(new Error()));
@@ -371,6 +367,7 @@ export class TunnelClient extends AbstractTunnel<
     tunnelSocket.on("error", () => {});
     tunnelSocket.on("close", () => {
       this.log(`disconnected`);
+      this.tunnelEvent.emit("disconnected");
       muxSocket.destroy();
       if (!this.aborted) {
         this.restartTimeout = this.setTimeout(() => {
@@ -400,7 +397,7 @@ export class TunnelClient extends AbstractTunnel<
         this.log(
           `connected to ${formatRemote(tunnelSocket)} from ${formatLocal(tunnelSocket)}`,
         );
-        this.connectedEvent.emit("connected");
+        this.tunnelEvent.emit("connected");
       });
     });
   }
