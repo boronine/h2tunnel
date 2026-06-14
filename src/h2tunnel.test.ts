@@ -419,15 +419,28 @@ class EchoOriginAndBrowser extends Stoppable {
       assert.strictEqual(socket2.readyState, "open");
       await Promise.all([
         new Promise<void>((resolve) => {
-          socket2.on("error", (err) => {
+          let resolved = false;
+          const done = () => {
+            if (resolved) return;
+            resolved = true;
+            resolve();
+          };
+          socket2.once("error", (err) => {
             assert.strictEqual(err["code"], "ECONNRESET");
             assert.strictEqual(socket2.readyState, "closed");
             assert.strictEqual(socket2.destroyed, true);
-            resolve();
+            done();
+          });
+          socket2.once("close", (hasError) => {
+            // Some Node versions emit close without a preceding error event on RST
+            assert.strictEqual(hasError, true);
+            assert.strictEqual(socket2.readyState, "closed");
+            assert.strictEqual(socket2.destroyed, true);
+            done();
           });
         }),
         new Promise<void>((resolve) => {
-          socket1.on("close", (hasError) => {
+          socket1.once("close", (hasError) => {
             // No error on our end because we initiated the RST
             assert.strictEqual(hasError, false);
             assert.strictEqual(socket1.readyState, "closed");
