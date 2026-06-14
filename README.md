@@ -212,6 +212,16 @@ npm run test
 npm run coverage # See build/index.html
 ```
 
+## Releasing
+
+Publishing to npm is automated by the
+[Publish to npm](https://github.com/boronine/h2tunnel/actions/workflows/npm-publish.yml) GitHub Actions workflow.
+It runs when a GitHub Release is published, builds and tests the package on a GitHub-hosted runner, and publishes with
+`npm publish --provenance` using npm trusted publishing so npm records a provenance attestation for the package.
+
+Configure npm trusted publishing for the `boronine/h2tunnel` repository and `npm-publish.yml` workflow before publishing
+the next release.
+
 ## CHANGELOG
 
 See [CHANGELOG.md](./CHANGELOG.md) file for full text.
