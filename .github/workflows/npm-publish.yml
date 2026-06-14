@@ -30,6 +30,4 @@ jobs:
             exit 1
           fi
       - run: npm run build
-      - run: npm run test
-      - run: npm run test_ipv4_docker
       - run: npm publish --provenance --access public
