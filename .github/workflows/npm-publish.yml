@@ -30,4 +30,14 @@ jobs:
             exit 1
           fi
       - run: npm run build
-      - run: npm publish --provenance --access public
+      - name: Publish to npm
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "$package_version" =~ -([a-zA-Z]+) ]]; then
+            tag="${BASH_REMATCH[1]}"
+            echo "Publishing prerelease with dist-tag: $tag"
+            npm publish --provenance --access public --tag "$tag"
+          else
+            echo "Publishing stable release"
+            npm publish --provenance --access public
+          fi
