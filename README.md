@@ -12,8 +12,6 @@ your local machine through this tunnel. In effect, your local server becomes pub
 All this in [less than 500 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
 with no dependencies.
 
-![Diagram](https://raw.githubusercontent.com/boronine/h2tunnel/main/diagram.drawio.svg)
-
 ## How does h2tunnel work?
 
 h2tunnel is unique among [its many alternatives](https://github.com/anderspitman/awesome-tunneling) for the way it
@@ -23,6 +21,31 @@ leverages existing protocols:
 2. The server receives this TLS connection and initiates a persistent HTTP/2 session through the socket back to the client
 3. The server takes incoming TCP connections, converts them into HTTP/2 streams, and forwards them to the client
 4. The client receives these HTTP/2 streams, converts them back into TCP connections and forwards them to the local server
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Origin as Local origin server
+    participant Client as h2tunnel client
+    participant Server as h2tunnel server
+    actor Ext as External client
+
+    Client->>Server: Open TLS tunnel (mTLS)
+    Server->>Client: Establish HTTP/2 session through tunnel
+    Note over Server,Client: Persistent tunnel ready
+
+    Ext->>Server: Connect to public proxy port
+    Server->>Client: Open HTTP/2 stream
+    Client->>Origin: Connect to local origin port
+    Client-->>Server: HTTP/2 200 response
+
+    Ext->>Server: Application data
+    Server->>Client: Forward over HTTP/2 stream
+    Client->>Origin: Forward to local origin
+    Origin->>Client: Response data
+    Client->>Server: Forward over HTTP/2 stream
+    Server->>Ext: Return response data
+```
 
 We use [HTTP/2](https://en.wikipedia.org/wiki/HTTP/2) to take advantage of its built-in multiplexing feature. This
 allows simultaneous duplex streams to be processed on a single TCP connection (the "tunnel").
