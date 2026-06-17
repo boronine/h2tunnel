@@ -12,8 +12,6 @@ your local machine through this tunnel. In effect, your local server becomes pub
 All this in [less than 500 LOC](https://github.com/boronine/h2tunnel/blob/main/src/h2tunnel.ts)
 with no dependencies.
 
-![Diagram](https://raw.githubusercontent.com/boronine/h2tunnel/main/diagram.drawio.svg)
-
 ## How does h2tunnel work?
 
 h2tunnel is unique among [its many alternatives](https://github.com/anderspitman/awesome-tunneling) for the way it
@@ -27,10 +25,10 @@ leverages existing protocols:
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Ext as External client
-    participant Server as h2tunnel server
-    participant Client as h2tunnel client
     participant Origin as Local origin server
+    participant Client as h2tunnel client
+    participant Server as h2tunnel server
+    actor Ext as External client
 
     Client->>Server: Open TLS tunnel (mTLS)
     Server->>Client: Establish HTTP/2 session through tunnel
