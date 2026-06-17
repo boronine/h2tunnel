@@ -24,6 +24,31 @@ leverages existing protocols:
 3. The server takes incoming TCP connections, converts them into HTTP/2 streams, and forwards them to the client
 4. The client receives these HTTP/2 streams, converts them back into TCP connections and forwards them to the local server
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Ext as External client
+    participant Server as h2tunnel server
+    participant Client as h2tunnel client
+    participant Origin as Local origin server
+
+    Client->>Server: Open TLS tunnel (mTLS)
+    Server->>Client: Establish HTTP/2 session through tunnel
+    Note over Server,Client: Persistent tunnel ready
+
+    Ext->>Server: Connect to public proxy port
+    Server->>Client: Open HTTP/2 stream
+    Client->>Origin: Connect to local origin port
+    Client-->>Server: HTTP/2 200 response
+
+    Ext->>Server: Application data
+    Server->>Client: Forward over HTTP/2 stream
+    Client->>Origin: Forward to local origin
+    Origin->>Client: Response data
+    Client->>Server: Forward over HTTP/2 stream
+    Server->>Ext: Return response data
+```
+
 We use [HTTP/2](https://en.wikipedia.org/wiki/HTTP/2) to take advantage of its built-in multiplexing feature. This
 allows simultaneous duplex streams to be processed on a single TCP connection (the "tunnel").
 
