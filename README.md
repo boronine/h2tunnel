@@ -27,10 +27,11 @@ leverages existing protocols:
 We use [HTTP/2](https://en.wikipedia.org/wiki/HTTP/2) to take advantage of its built-in multiplexing feature. This
 allows simultaneous duplex streams to be processed on a single TCP connection (the "tunnel").
 
-For authentication we use a self-signed [TLS](https://en.wikipedia.org/wiki/Transport_Layer_Security) certificate +
-private key pair. This pair is used by both the client and the server, and both are configured to reject any other
-credential. The pair is effectively a shared password. TLS has a ["pre-shared key" mode](https://en.wikipedia.org/wiki/TLS-PSK)
-which would be more appropriate but Node.js documentation [warns against using it](https://github.com/boronine/h2tunnel/issues/5).
+For authentication we use [mutual TLS (mTLS)](https://www.cloudflare.com/learning/access-management/what-is-mutual-tls/)
+with a self-signed [TLS](https://en.wikipedia.org/wiki/Transport_Layer_Security) certificate + private key pair. This pair
+is used by both the client and the server, and both are configured to reject any other credential. The pair is effectively
+a shared password. TLS has a ["pre-shared key" mode](https://en.wikipedia.org/wiki/TLS-PSK) which would be more appropriate
+but Node.js documentation [warns against using it](https://github.com/boronine/h2tunnel/issues/5).
 
 ## Installation
 
