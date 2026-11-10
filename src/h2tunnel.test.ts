@@ -896,26 +896,32 @@ for (const IPVERSION of [4, 6]) {
       await echo.startAndWaitUntilListening();
       LOG_LINES = [];
 
+      // "server disconnected" is logged from the server's socket close handler
+      // while the client is still inside stop(). Node 22 delivers it after
+      // "client stopped", Node 24 before, and neither side controls the other,
+      // so the two sequences are checked separately. Each one is ordered.
+      const serverDisconnected = server.waitUntilDisconnected();
       await client.stop();
-      // The server only notices the tunnel is gone from its socket close
-      // handler, which runs after the client's sockets are already closed.
-      // Wait for that before reconnecting: client.start() opens the new
-      // tunnel immediately, and the server cannot accept it until it has
-      // dropped the old one.
-      await server.waitUntilDisconnected();
+      await serverDisconnected;
       client.start();
 
       // Wait until client reconnected
       await server.waitUntilConnected();
       await client.waitUntilConnected();
 
+      const serverLines = LOG_LINES.filter((line) => line.startsWith("server"));
+      const clientLines = LOG_LINES.filter((line) => line.startsWith("client"));
+      LOG_LINES = serverLines;
+      assertLastLines([
+        "server   disconnected",
+        `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
+      ]);
+      LOG_LINES = clientLines;
       assertLastLines([
         "client   stopping",
         "client   disconnected",
         "client   stopped",
-        "server   disconnected",
         "client   connecting",
-        `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
         `client   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
       ]);
 
