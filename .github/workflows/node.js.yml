@@ -14,16 +14,20 @@ jobs:
     strategy:
       matrix:
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-        node-version: [18.x, 20.x, 22.x]
+        node-version: [18.x, 20.x, 22.x, 24.x, 26.x]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: "npm"
       - run: npm ci
       - run: npm run build
       - run: npm run test
+      # 26.x is the Active LTS line; it is the only leg that runs coverage,
+      # so the report shows up once in the CI logs.
+      - run: npm run coverage
+        if: ${{ matrix.node-version == '26.x' }}
       - run: npm run test_ipv4_docker
-        if: ${{ matrix.node-version == '22.x' }}
+        if: ${{ matrix.node-version == '26.x' }}
