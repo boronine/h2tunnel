@@ -897,6 +897,12 @@ for (const IPVERSION of [4, 6]) {
       LOG_LINES = [];
 
       await client.stop();
+      // The server only notices the tunnel is gone from its socket close
+      // handler, which runs after the client's sockets are already closed.
+      // Wait for that before reconnecting: client.start() opens the new
+      // tunnel immediately, and the server cannot accept it until it has
+      // dropped the old one.
+      await server.waitUntilDisconnected();
       client.start();
 
       // Wait until client reconnected
@@ -907,8 +913,8 @@ for (const IPVERSION of [4, 6]) {
         "client   stopping",
         "client   disconnected",
         "client   stopped",
-        "client   connecting",
         "server   disconnected",
+        "client   connecting",
         `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
         `client   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
       ]);
