@@ -148,7 +148,10 @@ function assertLastLines(...expectedLines: L[][]) {
   // get last lines
   const actual = LOG_LINES.join("\n");
   LOG_LINES = [];
-  assert.match(actual, linesToRegex(expectedLines[0]));
+  assert.ok(
+    expectedLines.some((lines) => linesToRegex(lines).test(actual)),
+    `Log lines did not match any expected order:\n${actual}`,
+  );
 }
 
 async function expectExitCode(
@@ -903,15 +906,29 @@ for (const IPVERSION of [4, 6]) {
       await server.waitUntilConnected();
       await client.waitUntilConnected();
 
-      assertLastLines([
-        "client   stopping",
-        "client   disconnected",
-        "client   stopped",
-        "client   connecting",
-        "server   disconnected",
-        `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
-        `client   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
-      ]);
+      // "server disconnected" is logged from the tunnel socket's close handler,
+      // which races the client's own stop() finishing, so it can land anywhere
+      // from right after "client disconnected" up to just before the reconnect.
+      assertLastLines(
+        [
+          "client   stopping",
+          "client   disconnected",
+          "client   stopped",
+          "client   connecting",
+          "server   disconnected",
+          `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
+          `client   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
+        ],
+        [
+          "client   stopping",
+          "client   disconnected",
+          "server   disconnected",
+          "client   stopped",
+          "client   connecting",
+          `server   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
+          `client   connected to ${LOCAL_HOST_FMT}:${TUNNEL_PORT} from ${LOCAL_HOST_FMT}:00`,
+        ],
+      );
 
       // Make sure client reconnected and request succeeds
       await echo.expectPingPongAndClose();
